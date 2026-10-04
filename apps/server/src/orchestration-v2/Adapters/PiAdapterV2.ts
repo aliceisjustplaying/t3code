@@ -487,6 +487,7 @@ export function makePiAdapterV2(
       const sessionEventPermit = yield* Semaphore.make(1);
       let threadState: PiThreadState | null = null;
       let backgroundProbe: Deferred.Deferred<boolean> | undefined;
+      let noticeOrdinal = 0;
       let registrationAttempted = false;
       let lastNativeThreadId: string | null = null;
       // User Stop intentionally tears down this RPC process after aborting.
@@ -1209,7 +1210,37 @@ export function makePiAdapterV2(
           const state = threadState;
           const turn = state?.activeTurn ?? null;
           const message = recordString(event, "message") ?? "";
-          if (turn === null || message.length === 0) return;
+          if (state === null || message.length === 0) return;
+          if (turn === null) {
+            const now = yield* DateTime.now;
+            const nativeItemId = `notify:${input.providerSessionId}:idle:${nativeRequestId ?? DateTime.toEpochMillis(now)}:${noticeOrdinal++}`;
+            yield* emit({
+              type: "turn_item.updated",
+              driver: PI_PROVIDER,
+              turnItem: {
+                id: idAllocator.derive.turnItemFromProviderItem({
+                  driver: PI_PROVIDER,
+                  nativeItemId,
+                }),
+                threadId: input.threadId,
+                runId: null,
+                nodeId: null,
+                providerThreadId: state.providerThread.id,
+                providerTurnId: null,
+                nativeItemRef: providerRef(nativeItemId),
+                parentItemId: null,
+                ordinal: noticeOrdinal,
+                startedAt: now,
+                updatedAt: now,
+                completedAt: now,
+                status: "completed",
+                title: message,
+                type: "system_notice",
+                message,
+              },
+            });
+            return;
+          }
           const emittedAt = yield* DateTime.now;
           const nativeItemId = `notify:${turn.providerTurn.id}:${turn.nextItemOrdinal}`;
           yield* emitItemNode(turn, nativeItemId, "system", "completed", emittedAt, emittedAt);

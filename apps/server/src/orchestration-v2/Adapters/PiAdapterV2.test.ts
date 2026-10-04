@@ -470,6 +470,34 @@ const expectModelFailure = (errorMessage: string) =>
   }).pipe(Effect.scoped, Effect.provide(testLayer));
 
 describe("PiAdapterV2", () => {
+  it.effect("delivers extension notices between turns without starting a run", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* fake.emit({
+        type: "extension_ui_request",
+        method: "notify",
+        id: "idle-note",
+        message: "A background task finished.",
+      });
+      const event = yield* takeEvent((e) => e.type === "turn_item.updated");
+      assert.isTrue(event.type === "turn_item.updated");
+      if (event.type !== "turn_item.updated") return;
+      assert.equal(event.turnItem.providerThreadId, providerThread.id);
+      assert.isNull(event.turnItem.runId);
+      assert.isNull(event.turnItem.providerTurnId);
+      assert.equal(event.turnItem.title, "A background task finished.");
+      assert.isFalse(fake.allRequests().some((r) => r["type"] === "prompt"));
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+
+
   it.effect("gives notify and extension-error items distinct ids in each thread", () =>
     Effect.gen(function* () {
       const itemIds: Array<string> = [];
