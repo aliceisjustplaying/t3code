@@ -470,6 +470,60 @@ const expectModelFailure = (errorMessage: string) =>
   }).pipe(Effect.scoped, Effect.provide(testLayer));
 
 describe("PiAdapterV2", () => {
+  it.effect("gives notify and extension-error items distinct ids in each thread", () =>
+    Effect.gen(function* () {
+      const itemIds: Array<string> = [];
+      for (const [threadId, sessionId] of [
+        [THREAD_ID, SESSION_ID],
+        [ThreadId.make("thread-pi-test-2"), ProviderSessionId.make("provider-session-pi-test-2")],
+      ] as const) {
+        const fake = yield* makeFakePi;
+        const { runtime, takeEvent } = yield* openRuntime(fake, "default", threadId, sessionId);
+        const providerThread = yield* runtime.ensureThread({
+          threadId,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        // Both turns start at the same item ordinal.
+        yield* startTurn(
+          runtime,
+          providerThread,
+          "default",
+          [],
+          "Hello pi",
+          undefined,
+          1,
+          threadId,
+        );
+        yield* fake.takeRequest("prompt");
+        yield* fake.emit({
+          type: "extension_ui_request",
+          id: "ui-notify",
+          method: "notify",
+          message: `note from ${threadId}`,
+          notifyType: "info",
+        });
+        yield* fake.emit({
+          type: "extension_error",
+          extensionPath: "/ext/example.ts",
+          event: "tool_call",
+          error: "boom",
+        });
+        for (const prefix of ["notify:", "extension-error:"]) {
+          const item = yield* takeEvent(
+            (event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.nativeItemRef?.nativeId?.startsWith(prefix) === true,
+          );
+          assert.isTrue(item.type === "turn_item.updated" && item.turnItem.threadId === threadId);
+          if (item.type === "turn_item.updated") itemIds.push(item.turnItem.id);
+        }
+      }
+      assert.equal(new Set(itemIds).size, 4);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+
   it.effect("pins idle sessions while extension work remains and releases when it ends", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
