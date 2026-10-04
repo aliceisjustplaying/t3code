@@ -7072,10 +7072,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           updatedAt: now,
         },
       });
-      // The note's source hears the answer; restoring a note tells it nothing.
+      // Undo must reach the source too, so it can forget a previous Knew answer.
       const { resolution } = command;
       const { providerThreadId } = item;
-      if (resolution === null || providerThreadId === null) return;
+      if (providerThreadId === null) return;
       const answer: PendingOrchestrationEffectV2 = {
         id: `effect:${command.commandId}:provider-heads-up.answer`,
         commandId: command.commandId,

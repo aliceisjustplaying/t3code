@@ -447,6 +447,7 @@ export function makeOrchestratorV2ReplayLayerWithRegistry<Error>(
         )
       : Layer.empty;
   const effectExecutorProvided = EffectWorker.executorLayer.pipe(
+    Layer.provide(runtimeLayer),
     Layer.provide(
       Layer.mergeAll(
         runFinalizationServiceProvided,

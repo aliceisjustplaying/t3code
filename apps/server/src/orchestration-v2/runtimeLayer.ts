@@ -268,6 +268,7 @@ const threadTitleRegenerationProvided = threadTitleRegenerationServiceLayer.pipe
   Layer.provide(Layer.mergeAll(threadManagementProvided, ProjectStore.layer, TextGeneration.layer)),
 );
 const effectExecutorProvided = effectExecutorLayer.pipe(
+  Layer.provide(runtimePolicyProvided),
   Layer.provide(
     Layer.mergeAll(
       runFinalizationServiceProvided,

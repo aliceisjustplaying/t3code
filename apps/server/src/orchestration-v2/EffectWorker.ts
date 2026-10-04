@@ -1,3 +1,4 @@
+import * as RuntimePolicy from "./RuntimePolicy.ts";
 import { CommandId } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -81,6 +82,7 @@ export class OrchestrationEffectExecutorV2 extends Context.Service<
 export const executorLayer: Layer.Layer<
   OrchestrationEffectExecutorV2,
   never,
+  | RuntimePolicy.RuntimePolicyV2
   | ProviderSessionManager.ProviderSessionManagerV2
   | RunFinalizationService.RunFinalizationService
   | CheckpointRollbackService.CheckpointRollbackServiceV2
@@ -96,6 +98,7 @@ export const executorLayer: Layer.Layer<
     const runFinalization = yield* RunFinalizationService.RunFinalizationService;
     const resourceCleanup = yield* ResourceCleanupService.ResourceCleanupService;
     const checkpointRollback = yield* CheckpointRollbackService.CheckpointRollbackServiceV2;
+    const runtimePolicy = yield* RuntimePolicy.RuntimePolicyV2;
     const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
     const providerTurnControl = yield* ProviderTurnControlService.ProviderTurnControlServiceV2;
     const providerTurnStart = yield* ProviderTurnStartService.ProviderTurnStartServiceV2;
@@ -361,7 +364,7 @@ export const executorLayer: Layer.Layer<
               );
           case "provider-heads-up.answer": {
             const request = effect.request;
-            // Only a live session can still hold the note; a closed one forgot it.
+            // Restore the source session when needed; notes and feedback survive process release.
             return Effect.gen(function* () {
               const { providerThreads } = yield* threads.getThreadRecords(effect.threadId, [
                 "providerThreads",
@@ -371,8 +374,41 @@ export const executorLayer: Layer.Layer<
               );
               if (providerThread?.providerSessionId == null) return;
               const session = yield* providerSessions.get(providerThread.providerSessionId);
-              if (Option.isNone(session) || session.value.answerHeadsUp === undefined) return;
-              yield* session.value.answerHeadsUp({
+              let runtime = Option.getOrUndefined(session);
+              if (runtime === undefined) {
+                if (providerThread.driver !== "pi" && providerThread.driver !== "claude") return;
+                const projection = yield* threads.getThreadProjection(effect.threadId);
+                const previous = projection.providerSessions.find(
+                  (candidate) => candidate.id === providerThread.providerSessionId,
+                );
+                const modelSelection = {
+                  ...projection.thread.modelSelection,
+                  instanceId: providerThread.providerInstanceId,
+                  ...(previous?.model == null ? {} : { model: previous.model }),
+                };
+                const policy = yield* runtimePolicy.resolve({
+                  thread: projection.thread,
+                  modelSelection,
+                });
+                runtime = yield* providerSessions.open({
+                  threadId: effect.threadId,
+                  providerSessionId: providerThread.providerSessionId,
+                  modelSelection,
+                  runtimePolicy: policy,
+                  ...(previous ? { resumeFromSession: previous } : {}),
+                  ...(providerThread.nativeThreadRef?.nativeId
+                    ? { initialNativeThreadId: providerThread.nativeThreadRef.nativeId }
+                    : {}),
+                });
+                yield* runtime.ensureThread({
+                  threadId: effect.threadId,
+                  modelSelection,
+                  runtimePolicy: policy,
+                  existingProviderThread: providerThread,
+                });
+              }
+              if (runtime.answerHeadsUp === undefined) return;
+              yield* runtime.answerHeadsUp({
                 providerThread,
                 noteId: request.noteId,
                 resolution: request.resolution,

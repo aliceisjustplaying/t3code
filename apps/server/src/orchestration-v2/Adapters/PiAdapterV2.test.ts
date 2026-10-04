@@ -699,8 +699,8 @@ describe("PiAdapterV2", () => {
           pendingMessageCount: 0,
         });
         // Let that answer reach the event pump ahead of the ack, the order that
-      // ended the turn early. The turn must survive the other order too.
-      for (let i = 0; i < 100; i++) yield* Effect.yieldNow;
+        // ended the turn early. The turn must survive the other order too.
+        for (let i = 0; i < 100; i++) yield* Effect.yieldNow;
         yield* fake.emit({
           type: "response",
           command: "prompt",
@@ -734,6 +734,51 @@ describe("PiAdapterV2", () => {
         assert.include(replies, "Hello back.");
         assert.equal(yield* Queue.size(offers), 0);
       }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("delivers extension notices between turns without starting a run", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* fake.emit({
+        type: "extension_ui_request",
+        method: "notify",
+        id: "idle-note",
+        message: "[ysk:idle] Heads up · A child finished.",
+      });
+      const event = yield* takeEvent((e) => e.type === "turn_item.updated");
+      assert.isTrue(event.type === "turn_item.updated");
+      if (event.type !== "turn_item.updated") return;
+      assert.equal(event.turnItem.providerThreadId, providerThread.id);
+      assert.isNull(event.turnItem.runId);
+      assert.isNull(event.turnItem.providerTurnId);
+      assert.equal(event.turnItem.title, "[ysk:idle] Heads up · A child finished.");
+      assert.isFalse(fake.allRequests().some((r) => r["type"] === "prompt"));
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("pins idle sessions while extension work remains and releases when it ends", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime } = yield* openRuntime(fake);
+      for (const pending of [true, false]) {
+        const probe = yield* Effect.forkChild(runtime.hasPendingBackgroundWork!);
+        const request = yield* fake.takeRequest("prompt");
+        assert.equal(request["message"], "/t3-background-work");
+        yield* fake.emit({
+          type: "extension_ui_request",
+          method: "setStatus",
+          statusKey: "t3:background-work",
+          statusText: pending ? "pending" : "idle",
+        });
+        assert.equal(yield* Fiber.join(probe), pending);
+      }
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
   it.effect("gives notify and extension-error items distinct ids in each thread", () =>

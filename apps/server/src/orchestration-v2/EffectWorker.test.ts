@@ -1,3 +1,4 @@
+import * as RuntimePolicy from "./RuntimePolicy.ts";
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
@@ -147,6 +148,7 @@ function makeExecutorLayer(input: {
     ),
   );
   return EffectWorker.executorLayer.pipe(
+    Layer.provide(RuntimePolicy.layer),
     Layer.provide(
       Layer.mergeAll(
         dependencies,

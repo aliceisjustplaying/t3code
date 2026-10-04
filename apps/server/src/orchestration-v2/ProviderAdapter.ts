@@ -566,7 +566,7 @@ export interface ProviderAdapterV2SessionRuntime {
   readonly answerHeadsUp?: (input: {
     readonly providerThread: OrchestrationV2ProviderThread;
     readonly noteId: string;
-    readonly resolution: OrchestrationV2HeadsUpAction;
+    readonly resolution: OrchestrationV2HeadsUpAction | null;
   }) => Effect.Effect<void, ProviderAdapterV2Error>;
   readonly respondToRuntimeRequest: (
     input: ProviderAdapterV2RuntimeRequestResponseInput,
