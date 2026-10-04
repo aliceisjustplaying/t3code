@@ -335,6 +335,15 @@ interface ActivePiTurn {
   activeCompaction: PiCompactionState | null;
   activeProviderRetry: PiProviderRetryState | null;
   failure: ReturnType<typeof makeProviderFailure> | null;
+  /**
+   * The turn took over a run Pi started on its own (see `holdWake`) and also
+   * sent a prompt. Until Pi acks that prompt, an `agent_settled` or idle
+   * snapshot may describe the taken run before Pi has started the prompt, so
+   * the turn must not settle on it.
+   */
+  awaitingPromptAck: boolean;
+  /** Pi rejected this turn's prompt while the taken run kept going; the turn fails once that run settles. */
+  promptRejection: ReturnType<typeof makeProviderFailure> | null;
   /** Session-tree refs read just before Stop terminates Pi, when no read is possible later. */
   stopTreeRefs?: PiTurnTreeRefs | null;
 }
@@ -1418,6 +1427,7 @@ export function makePiAdapterV2(
         const turn = state.activeTurn;
         if (turn === null) return;
         state.activeTurn = null;
+        if (turn.failure === null) turn.failure = turn.promptRejection;
         const completedAt = yield* DateTime.now;
         yield* completeOpenStreamItems(turn);
         if (turn.activeCompaction !== null) {
@@ -1876,7 +1886,22 @@ export function makePiAdapterV2(
             const pendingPrompt = command === "prompt" ? pendingPromptResponses.shift() : undefined;
             const responseTurn =
               pendingPrompt?.providerTurnId === turn?.providerTurn.id ? turn : null;
+            const takenRunTurn =
+              pendingPrompt?.kind === "turn_start" && responseTurn?.awaitingPromptAck === true
+                ? responseTurn
+                : null;
+            if (takenRunTurn !== null) takenRunTurn.awaitingPromptAck = false;
             if (event["success"] === true) {
+              if (takenRunTurn !== null) {
+                if (recordString(recordField(event, "data"), "disposition") === "started") {
+                  // Pi was idle, so a settle seen so far ended the taken run;
+                  // the prompt's own run settles the turn.
+                  takenRunTurn.settleWhenIdle = false;
+                  takenRunTurn.settleProbeGeneration += 1;
+                } else if (takenRunTurn.settleWhenIdle) {
+                  yield* scheduleSettleProbe(takenRunTurn, true);
+                }
+              }
               // Deferred success ack. Command-only prompts (pure extension
               // slash commands) never start an agent run and never emit
               // `agent_settled`, so probe for idleness. The probe result is
@@ -1909,10 +1934,19 @@ export function makePiAdapterV2(
                   ? turn
                   : null;
             if (failedTurn !== null) {
-              failedTurn.failure = makeProviderFailure({
+              const rejection = makeProviderFailure({
                 message: recordString(event, "error") ?? "Pi rejected the prompt.",
                 class: "provider_error",
               });
+              if (failedTurn === takenRunTurn) {
+                // The taken run may still be going. Finalizing now would
+                // leave it running with no turn to show its output, so the
+                // turn fails once that run settles.
+                failedTurn.promptRejection = rejection;
+                if (failedTurn.settleWhenIdle) yield* scheduleSettleProbe(failedTurn, true);
+                return;
+              }
+              failedTurn.failure = rejection;
               if (state !== null) yield* finalizeTurn(state);
             }
             return;
@@ -1936,6 +1970,7 @@ export function makePiAdapterV2(
             if (
               turn === null ||
               turn.providerTurn.id !== event["providerTurnId"] ||
+              turn.awaitingPromptAck ||
               turn.settleProbeGeneration !== event["settleProbeGeneration"] ||
               (!settleAfterAgentActivity && turn.sawAgentActivity) ||
               turn.activeCompaction !== null
@@ -2401,6 +2436,8 @@ export function makePiAdapterV2(
               activeCompaction: null,
               activeProviderRetry: null,
               failure: null,
+              awaitingPromptAck: false,
+              promptRejection: null,
             };
             // Only the install/send/start-event boundary excludes the event
             // pump. Earlier correlated requests must leave the pump free so
@@ -2449,6 +2486,7 @@ export function makePiAdapterV2(
               const held = wake;
               wake = null;
               if (held !== null) held.dropped = true;
+              activeTurn.awaitingPromptAck = held !== null && payload !== null;
               for (const event of held?.events ?? []) yield* handleSessionEvent(event);
               if (continuation && held === null) yield* scheduleSettleProbe(activeTurn);
             }).pipe(
