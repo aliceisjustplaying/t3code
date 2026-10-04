@@ -47,6 +47,7 @@ import {
   type OrchestrationV2ProviderTurnTokenUsage,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
+import * as Deferred from "effect/Deferred";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 import * as Duration from "effect/Duration";
@@ -486,6 +487,8 @@ export function makePiAdapterV2(
       // dialog's own resolution updates.
       const sessionEventPermit = yield* Semaphore.make(1);
       let threadState: PiThreadState | null = null;
+      let backgroundProbe: Deferred.Deferred<boolean> | undefined;
+      let noticeOrdinal = 0;
       let registrationAttempted = false;
       let lastNativeThreadId: string | null = null;
       // User Stop intentionally tears down this RPC process after aborting.
@@ -528,7 +531,7 @@ export function makePiAdapterV2(
       let contextWindow: number | null = null;
       const modelContextWindows = new Map<string, number>();
       let modelsDiscovered = false;
-      // Prompt responses carry no id. Keep their session-wide send order and
+      // Prompts sent through connection.send omit an id. Keep their send order and
       // owner so a late ack from a settled turn cannot affect the next turn.
       const pendingPromptResponses: Array<{
         readonly providerTurnId: OrchestrationV2ProviderTurn["id"];
@@ -1196,11 +1199,50 @@ export function makePiAdapterV2(
         const method = recordString(event, "method");
         const nativeRequestId = recordString(event, "id");
         if (method === undefined) return;
+        if (method === "setStatus" && recordString(event, "statusKey") === "t3:background-work") {
+          if (backgroundProbe !== undefined) {
+            yield* Deferred.succeed(
+              backgroundProbe,
+              recordString(event, "statusText") === "pending",
+            );
+          }
+          return;
+        }
         if (method === "notify") {
           const state = threadState;
           const turn = state?.activeTurn ?? null;
           const message = recordString(event, "message") ?? "";
-          if (turn === null || message.length === 0) return;
+          if (state === null || message.length === 0) return;
+          if (turn === null) {
+            const now = yield* DateTime.now;
+            const nativeItemId = `notify:${input.providerSessionId}:idle:${nativeRequestId ?? DateTime.toEpochMillis(now)}:${noticeOrdinal++}`;
+            yield* emit({
+              type: "turn_item.updated",
+              driver: PI_PROVIDER,
+              turnItem: {
+                id: idAllocator.derive.turnItemFromProviderItem({
+                  driver: PI_PROVIDER,
+                  nativeItemId,
+                }),
+                threadId: input.threadId,
+                runId: null,
+                nodeId: null,
+                providerThreadId: state.providerThread.id,
+                providerTurnId: null,
+                nativeItemRef: providerRef(nativeItemId),
+                parentItemId: null,
+                ordinal: noticeOrdinal,
+                startedAt: now,
+                updatedAt: now,
+                completedAt: now,
+                status: "completed",
+                title: message,
+                type: "system_notice",
+                message,
+              },
+            });
+            return;
+          }
           const emittedAt = yield* DateTime.now;
           const nativeItemId = `notify:${turn.providerTurn.id}:${turn.nextItemOrdinal}`;
           yield* emitItemNode(turn, nativeItemId, "system", "completed", emittedAt, emittedAt);
@@ -2294,6 +2336,31 @@ export function makePiAdapterV2(
           return sessionEntity;
         },
         events: Stream.fromQueue(events),
+        hasPendingBackgroundWork: Effect.gen(function* () {
+          const probe = yield* Deferred.make<boolean>();
+          backgroundProbe = probe;
+          yield* request({ type: "prompt", message: "/t3-background-work" }, 2_000);
+          const pending = yield* Deferred.await(probe);
+          const state = yield* request({ type: "get_state" }, 2_000);
+          return (
+            pending ||
+            wake !== null ||
+            recordField(state, "isStreaming") === true ||
+            recordField(state, "isCompacting") === true ||
+            (recordNumber(state, "pendingMessageCount") ?? 0) > 0
+          );
+        }).pipe(
+          Effect.timeoutOrElse({
+            duration: Duration.seconds(5),
+            orElse: () => Effect.succeed(true),
+          }),
+          Effect.catchCause(() => Effect.succeed(true)),
+          Effect.ensuring(
+            Effect.sync(() => {
+              backgroundProbe = undefined;
+            }),
+          ),
+        ),
         getModelContextWindow: (selection) => {
           if (selection.instanceId !== options.instanceId) return undefined;
           const slug =
@@ -2641,7 +2708,7 @@ export function makePiAdapterV2(
             if (!hasCommand) return;
             yield* request({
               type: "prompt",
-              message: `/ysk answer ${answer.noteId} ${answer.resolution}`,
+              message: `/ysk answer ${answer.noteId} ${answer.resolution ?? "undo"}`,
             });
           }).pipe(
             Effect.mapError(

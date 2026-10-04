@@ -86,7 +86,7 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
     type: Schema.Literal("provider-heads-up.answer"),
     providerThreadId: ProviderThreadId,
     noteId: Schema.String,
-    resolution: OrchestrationV2HeadsUpAction,
+    resolution: Schema.NullOr(OrchestrationV2HeadsUpAction),
   }),
   Schema.Struct({
     type: Schema.Literal("provider-thread.rollback"),
@@ -131,6 +131,7 @@ export const REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS = [
   "attachment.cleanup",
   "thread-title.generate",
   "delegated-tasks.stop",
+  "provider-heads-up.answer",
 ] as const satisfies ReadonlyArray<OrchestrationEffectRequestV2["type"]>;
 
 export const PROCESS_BOUND_EFFECT_TYPES = [
@@ -139,7 +140,6 @@ export const PROCESS_BOUND_EFFECT_TYPES = [
   "provider-turn.steer",
   "provider-turn.restart",
   "runtime-request.respond",
-  "provider-heads-up.answer",
 ] as const satisfies ReadonlyArray<OrchestrationEffectRequestV2["type"]>;
 
 export const OrchestrationEffectStatusV2 = Schema.Literals([
