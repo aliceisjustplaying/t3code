@@ -1,0 +1,9 @@
+# Upstream PRs merged into `stack`, in order. One number per line; text after it is a note.
+# Skipped: #13839 and #12506 conflict with upstream main.
+# 15529 and 14941 conflict with 15079 in PiProvider.test.ts only; rr-cache/ holds the resolutions.
+15368 Pi notify becomes a notice (HeadsUp relies on it)
+15444 Pi turns start while an extension run is streaming
+14435 declined Pi confirmations stay cancelled
+15079 stop restoring stale Pi models
+15529 more time for Pi model discovery
+14941 native provider labels for Pi models
