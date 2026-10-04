@@ -1,4 +1,7 @@
-import type { OrchestrationV2HistoricalMessage } from "@t3tools/contracts";
+import type {
+  OrchestrationV2HeadsUpAction,
+  OrchestrationV2HistoricalMessage,
+} from "@t3tools/contracts";
 import {
   ChatAttachment,
   CheckpointId,
@@ -555,6 +558,15 @@ export interface ProviderAdapterV2SessionRuntime {
    */
   readonly unloadThread?: (input: {
     readonly providerThread: OrchestrationV2ProviderThread;
+  }) => Effect.Effect<void, ProviderAdapterV2Error>;
+  /**
+   * Passes the user's answer to a heads-up note back to whatever raised it in
+   * the provider. Providers without a note source omit it.
+   */
+  readonly answerHeadsUp?: (input: {
+    readonly providerThread: OrchestrationV2ProviderThread;
+    readonly noteId: string;
+    readonly resolution: OrchestrationV2HeadsUpAction;
   }) => Effect.Effect<void, ProviderAdapterV2Error>;
   readonly respondToRuntimeRequest: (
     input: ProviderAdapterV2RuntimeRequestResponseInput,

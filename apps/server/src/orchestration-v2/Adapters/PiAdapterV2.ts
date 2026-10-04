@@ -2582,6 +2582,37 @@ export function makePiAdapterV2(
                 }),
             ),
           ),
+        // Notes come from the you-should-know extension, which keeps them in this
+        // process. Its command runs at once, even mid-run, and never reaches the
+        // model; a session without it would send the text to the model instead.
+        answerHeadsUp: (answer) =>
+          Effect.gen(function* () {
+            const nativeId = answer.providerThread.nativeThreadRef?.nativeId;
+            const hosted = threadState?.providerThread.nativeThreadRef?.nativeId;
+            if (nativeId == null || hosted !== nativeId || !/^[\w-]+$/.test(answer.noteId)) return;
+            const commands = recordField(yield* request({ type: "get_commands" }), "commands");
+            const hasCommand =
+              Array.isArray(commands) &&
+              commands.some(
+                (command) =>
+                  recordString(command, "name") === "ysk" &&
+                  recordString(command, "source") === "extension",
+              );
+            if (!hasCommand) return;
+            yield* request({
+              type: "prompt",
+              message: `/ysk answer ${answer.noteId} ${answer.resolution}`,
+            });
+          }).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapter.ProviderAdapterProtocolError({
+                  driver: PI_PROVIDER,
+                  detail: "Pi did not take the heads-up answer",
+                  cause,
+                }),
+            ),
+          ),
         respondToRuntimeRequest: (requestInput) =>
           Effect.gen(function* () {
             const pending = pendingPrompts.get(String(requestInput.requestId));

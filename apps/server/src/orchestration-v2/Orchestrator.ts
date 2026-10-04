@@ -7040,6 +7040,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const dispatchThreadHeadsUpResolve = (
     command: Extract<OrchestrationV2Command, { readonly type: "thread.heads-up.resolve" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
   ) =>
     Effect.gen(function* () {
       const projection = yield* loadProjectionForCommand(command, ["turnItems"], {
@@ -7071,6 +7072,22 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           updatedAt: now,
         },
       });
+      // The note's source hears the answer; restoring a note tells it nothing.
+      const { resolution } = command;
+      const { providerThreadId } = item;
+      if (resolution === null || providerThreadId === null) return;
+      const answer: PendingOrchestrationEffectV2 = {
+        id: `effect:${command.commandId}:provider-heads-up.answer`,
+        commandId: command.commandId,
+        threadId: command.threadId,
+        request: {
+          type: "provider-heads-up.answer",
+          providerThreadId,
+          noteId: headsUp.noteId,
+          resolution,
+        },
+      };
+      yield* Ref.update(effects, (existing) => [...existing, answer]);
     });
 
   const dispatchThreadUserInputDismiss = (
@@ -9606,7 +9623,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         yield* dispatchThreadUserInputDismiss(command, events, effects);
         break;
       case "thread.heads-up.resolve":
-        yield* dispatchThreadHeadsUpResolve(command, events);
+        yield* dispatchThreadHeadsUpResolve(command, events, effects);
         break;
       case "run.interrupt":
         cancelUnsettledEffects = yield* dispatchRunInterrupt(command, events, effects);
