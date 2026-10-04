@@ -1,4 +1,8 @@
-import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
+import * as HeadsUpExplainService from "./orchestration-v2/HeadsUpExplainService.ts";
+import {
+  OrchestrationExplainHeadsUpError,
+  OrchestrationDispatchCommandError,
+} from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 
@@ -1256,6 +1260,7 @@ const layerWsRpc = (
         yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
       const agentSessionScanner = yield* AgentSessionScanner.AgentSessionScanner;
       const agentSessionImporter = yield* AgentSessionImporter.AgentSessionImporter;
+      const headsUpExplain = yield* HeadsUpExplainService.HeadsUpExplainService;
       const checkpointDiffQuery = yield* CheckpointDiffQuery.CheckpointDiffQuery;
       const keybindings = yield* Keybindings.Keybindings;
       const environmentTheme = yield* EnvironmentTheme.EnvironmentThemeService;
@@ -1863,6 +1868,18 @@ const layerWsRpc = (
                   }),
                 ),
             ),
+          ),
+        [ORCHESTRATION_V2_WS_METHODS.explainHeadsUp]: (input) =>
+          observeRpcEffect(
+            ORCHESTRATION_V2_WS_METHODS.explainHeadsUp,
+            headsUpExplain
+              .explain(input)
+              .pipe(
+                Effect.mapError(
+                  (error) => new OrchestrationExplainHeadsUpError({ message: error.message }),
+                ),
+              ),
+            { "rpc.aggregate": "orchestration" },
           ),
         [ORCHESTRATION_V2_WS_METHODS.getWorkflowScript]: (input) =>
           readWorkflowScript({ scriptPath: input.scriptPath }),

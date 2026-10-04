@@ -699,8 +699,8 @@ describe("PiAdapterV2", () => {
           pendingMessageCount: 0,
         });
         // Let that answer reach the event pump ahead of the ack, the order that
-      // ended the turn early. The turn must survive the other order too.
-      for (let i = 0; i < 100; i++) yield* Effect.yieldNow;
+        // ended the turn early. The turn must survive the other order too.
+        for (let i = 0; i < 100; i++) yield* Effect.yieldNow;
         yield* fake.emit({
           type: "response",
           command: "prompt",
@@ -734,6 +734,51 @@ describe("PiAdapterV2", () => {
         assert.include(replies, "Hello back.");
         assert.equal(yield* Queue.size(offers), 0);
       }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("delivers extension notices between turns without starting a run", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* fake.emit({
+        type: "extension_ui_request",
+        method: "notify",
+        id: "idle-note",
+        message: "[ysk:idle] Heads up · A child finished.",
+      });
+      const event = yield* takeEvent((e) => e.type === "turn_item.updated");
+      assert.isTrue(event.type === "turn_item.updated");
+      if (event.type !== "turn_item.updated") return;
+      assert.equal(event.turnItem.providerThreadId, providerThread.id);
+      assert.isNull(event.turnItem.runId);
+      assert.isNull(event.turnItem.providerTurnId);
+      assert.equal(event.turnItem.title, "[ysk:idle] Heads up · A child finished.");
+      assert.isFalse(fake.allRequests().some((r) => r["type"] === "prompt"));
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("pins idle sessions while extension work remains and releases when it ends", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime } = yield* openRuntime(fake);
+      for (const pending of [true, false]) {
+        const probe = yield* Effect.forkChild(runtime.hasPendingBackgroundWork!);
+        const request = yield* fake.takeRequest("prompt");
+        assert.equal(request["message"], "/t3-background-work");
+        yield* fake.emit({
+          type: "extension_ui_request",
+          method: "setStatus",
+          statusKey: "t3:background-work",
+          statusText: pending ? "pending" : "idle",
+        });
+        assert.equal(yield* Fiber.join(probe), pending);
+      }
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
   it.effect("gives notify and extension-error items distinct ids in each thread", () =>
@@ -1908,7 +1953,7 @@ describe("PiAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
-  for (const { decision, native, itemStatus } of [
+  it.effect.each([
     { decision: "accept" as const, native: { confirmed: true }, itemStatus: "completed" as const },
     {
       decision: "decline" as const,
@@ -1916,54 +1961,52 @@ describe("PiAdapterV2", () => {
       itemStatus: "cancelled" as const,
     },
     { decision: "cancel" as const, native: { cancelled: true }, itemStatus: "cancelled" as const },
-  ]) {
-    it.effect(`settles a confirm dialog with ${decision} as ${itemStatus}`, () =>
-      Effect.gen(function* () {
-        const fake = yield* makeFakePi;
-        const { runtime, takeEvent } = yield* openRuntime(fake);
-        yield* runtime.ensureThread({
-          threadId: THREAD_ID,
-          modelSelection: modelSelection("default"),
-          runtimePolicy,
-        });
-        yield* fake.emit({
-          type: "extension_ui_request",
-          id: `ui-confirm-${decision}`,
-          method: "confirm",
-          title: "Run project extensions?",
-          message: "This project has .pi/extensions.",
-        });
-        const pending = yield* takeEvent(
-          (event) =>
-            event.type === "runtime_request.updated" && event.runtimeRequest.status === "pending",
-        );
-        const requestId =
-          pending.type === "runtime_request.updated" ? pending.runtimeRequest.id : undefined;
-        yield* runtime.respondToRuntimeRequest({ requestId: requestId!, decision });
-        const uiResponse = yield* fake.takeRequest("extension_ui_response");
-        assert.equal(uiResponse["id"], `ui-confirm-${decision}`);
-        if ("confirmed" in native) {
-          assert.equal(uiResponse["confirmed"], native.confirmed);
-          assert.isUndefined(uiResponse["cancelled"]);
-        } else {
-          assert.equal(uiResponse["cancelled"], native.cancelled);
-          assert.isUndefined(uiResponse["confirmed"]);
-        }
-        const resolved = yield* takeEvent(
-          (event) =>
-            event.type === "runtime_request.updated" && event.runtimeRequest.status === "resolved",
-        );
-        assert.equal(
-          resolved.type === "runtime_request.updated" ? resolved.runtimeRequest.status : null,
-          "resolved",
-        );
-        const node = yield* takeEvent((event) => event.type === "node.updated");
-        assert.equal(node.type === "node.updated" ? node.node.status : null, itemStatus);
-        const item = yield* takeEvent((event) => event.type === "turn_item.updated");
-        assert.equal(item.type === "turn_item.updated" ? item.turnItem.status : null, itemStatus);
-      }).pipe(Effect.scoped, Effect.provide(layerTest)),
-    );
-  }
+  ])("settles a confirm dialog with $decision as $itemStatus", ({ decision, native, itemStatus }) =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* fake.emit({
+        type: "extension_ui_request",
+        id: `ui-confirm-${decision}`,
+        method: "confirm",
+        title: "Run project extensions?",
+        message: "This project has .pi/extensions.",
+      });
+      const pending = yield* takeEvent(
+        (event) =>
+          event.type === "runtime_request.updated" && event.runtimeRequest.status === "pending",
+      );
+      const requestId =
+        pending.type === "runtime_request.updated" ? pending.runtimeRequest.id : undefined;
+      yield* runtime.respondToRuntimeRequest({ requestId: requestId!, decision });
+      const uiResponse = yield* fake.takeRequest("extension_ui_response");
+      assert.equal(uiResponse["id"], `ui-confirm-${decision}`);
+      if ("confirmed" in native) {
+        assert.equal(uiResponse["confirmed"], native.confirmed);
+        assert.isUndefined(uiResponse["cancelled"]);
+      } else {
+        assert.equal(uiResponse["cancelled"], native.cancelled);
+        assert.isUndefined(uiResponse["confirmed"]);
+      }
+      const resolved = yield* takeEvent(
+        (event) =>
+          event.type === "runtime_request.updated" && event.runtimeRequest.status === "resolved",
+      );
+      assert.equal(
+        resolved.type === "runtime_request.updated" ? resolved.runtimeRequest.status : null,
+        "resolved",
+      );
+      const node = yield* takeEvent((event) => event.type === "node.updated");
+      assert.equal(node.type === "node.updated" ? node.node.status : null, itemStatus);
+      const item = yield* takeEvent((event) => event.type === "turn_item.updated");
+      assert.equal(item.type === "turn_item.updated" ? item.turnItem.status : null, itemStatus);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
 
   it.effect("raises bridge edit confirmations as file-change approvals", () =>
     Effect.gen(function* () {

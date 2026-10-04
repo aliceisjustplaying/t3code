@@ -6,6 +6,7 @@ import {
 import type {
   EnvironmentId,
   OrchestrationV2HeadsUpAction,
+  OrchestrationV2HeadsUpExplainDirection,
   OrchestrationV2TurnItem,
   ProviderInteractionMode,
   RuntimeMode,
@@ -13,7 +14,7 @@ import type {
   TurnItemId,
 } from "@t3tools/contracts";
 import { ChevronDownIcon } from "lucide-react";
-import { useCallback, useMemo, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 
 import { cn, newMessageId } from "~/lib/utils";
 
@@ -59,6 +60,10 @@ export function useHeadsUpBand(input: {
   );
   const top = notes[0] ?? null;
   const resolveHeadsUp = useAtomCommand(threadEnvironment.resolveHeadsUp);
+  const explainHeadsUp = useAtomCommand(threadEnvironment.explainHeadsUp, { reportFailure: false });
+  const explanationRequest = useRef(0);
+  const [explanationLoading, setExplanationLoading] = useState(false);
+  const [explanationError, setExplanationError] = useState<string | null>(null);
   const startTurn = useAtomCommand(threadEnvironment.startTurn);
   const [explained, setExplained] = useState<PendingHeadsUp | null>(null);
   const [listOpen, setListOpen] = useState(false);
@@ -128,16 +133,76 @@ export function useHeadsUpBand(input: {
     [environmentId, interactionMode, runtimeMode, setResolution, startTurn, threadId],
   );
 
+  const explain = useCallback(
+    (
+      note: PendingHeadsUp,
+      rewrite?: { direction: OrchestrationV2HeadsUpExplainDirection; previous: string },
+    ) => {
+      setExplained(note);
+      setExplanationError(null);
+      const request = ++explanationRequest.current;
+      if ((!rewrite && note.explanation) || !note.canRequestExplanation || environmentId === null) {
+        if (note.explanation) setResolution([note.turnItemId], "learn");
+        setExplanationLoading(false);
+        return;
+      }
+      setExplanationLoading(true);
+      void explainHeadsUp({ environmentId, input: { noteId: note.noteId, ...rewrite } }).then(
+        (result) => {
+          if (request !== explanationRequest.current) return;
+          setExplanationLoading(false);
+          if (result._tag === "Success") {
+            setExplained({ ...note, explanation: result.value.markdown });
+            setResolution([note.turnItemId], "learn");
+          } else
+            setExplanationError(
+              "The explanation could not be loaded. The note can be reopened and retried.",
+            );
+        },
+      );
+    },
+    [environmentId, explainHeadsUp, setResolution],
+  );
+
   const act = useCallback(
     (note: PendingHeadsUp, action: OrchestrationV2HeadsUpAction) => {
       if (action === "send") return askAgent(note);
+      if (action === "learn") return explain(note);
       setResolution([note.turnItemId], action);
-      if (action === "learn") setExplained(note);
       if (action === "dismiss") offerUndo([note.turnItemId], "Heads-up dismissed");
       if (action === "knew") offerUndo([note.turnItemId], "Marked as known");
     },
-    [askAgent, offerUndo, setResolution],
+    [askAgent, explain, offerUndo, setResolution],
   );
+
+  useEffect(() => {
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if (
+        !top ||
+        explained ||
+        event.defaultPrevented ||
+        event.repeat ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.altKey
+      )
+        return;
+      const target = event.target;
+      if (
+        target instanceof Element &&
+        target.closest("input, textarea, [contenteditable=true], [role=dialog]")
+      )
+        return;
+      const action = ({ e: "learn", k: "knew", a: "send", x: "dismiss" } as const)[
+        event.key as "e" | "k" | "a" | "x"
+      ];
+      if (!action || (action === "learn" && !top.explanation && !top.canRequestExplanation)) return;
+      event.preventDefault();
+      act(top, action);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [act, explained, top]);
 
   const bannerItems = useMemo<ReadonlyArray<ComposerBannerStackItem>>(() => {
     if (top === null) return input.bannerItems;
@@ -202,7 +267,10 @@ export function useHeadsUpBand(input: {
     return [item, ...input.bannerItems];
   }, [act, input.bannerItems, listOpen, notes, top]);
 
-  const closeExplanation = () => setExplained(null);
+  const closeExplanation = () => {
+    explanationRequest.current++;
+    setExplained(null);
+  };
   const onExplanationKey = (event: KeyboardEvent) => {
     if (explained === null || event.key !== "a" || event.metaKey || event.ctrlKey) return;
     event.preventDefault();
@@ -224,9 +292,36 @@ export function useHeadsUpBand(input: {
             <NoteHeader note={explained} className="pe-8" />
           </DialogHeader>
           <DialogPanel>
-            <ChatMarkdown text={explained.explanation ?? ""} cwd={cwd} />
+            {explanationLoading ? (
+              <p role="status">Writing the explanation…</p>
+            ) : explanationError ? (
+              <p role="alert">{explanationError}</p>
+            ) : (
+              <ChatMarkdown text={explained.explanation ?? ""} cwd={cwd} />
+            )}
           </DialogPanel>
           <DialogFooter>
+            {explained.canRequestExplanation && explained.explanation
+              ? (
+                  [
+                    ["simpler_words", "Simpler"],
+                    ["less_detail", "Less detail"],
+                    ["more_detail", "More detail"],
+                  ] as const
+                ).map(([direction, label]) => (
+                  <Button
+                    key={direction}
+                    size="sm"
+                    variant="ghost"
+                    disabled={explanationLoading}
+                    onClick={() =>
+                      explain(explained, { direction, previous: explained.explanation! })
+                    }
+                  >
+                    {label}
+                  </Button>
+                ))
+              : null}
             <Button
               size="sm"
               variant="outline"
@@ -259,7 +354,7 @@ function NoteActions({
   onAct: (note: PendingHeadsUp, action: OrchestrationV2HeadsUpAction) => void;
 }) {
   const actions: Array<readonly [OrchestrationV2HeadsUpAction, string]> = [];
-  if (note.explanation) actions.push(["learn", "Explain"]);
+  if (note.explanation || note.canRequestExplanation) actions.push(["learn", "Explain"]);
   actions.push(["knew", "Knew"], ["send", "Ask agent"]);
   return actions.map(([action, label]) => (
     <Button key={action} size="xs" variant="ghost" onClick={() => onAct(note, action)}>

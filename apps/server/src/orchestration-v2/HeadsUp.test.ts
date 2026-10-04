@@ -181,7 +181,9 @@ it.effect("resolving a heads-up persists, survives a small window, and can be un
       turnItemId: itemId,
       resolution: null,
     });
-    assert.deepEqual(yield* answers("resolve-restore"), []);
+    assert.deepEqual(yield* answers("resolve-restore"), [
+      { type: "provider-heads-up.answer", providerThreadId, noteId: "n-1", resolution: null },
+    ]);
     const restored = yield* headsUpOf;
     assert.deepEqual(restored, {
       noteId: "n-1",
