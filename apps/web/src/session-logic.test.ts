@@ -448,6 +448,50 @@ describe("V2 session presentation", () => {
     }
   });
 
+  it("leaves open heads-up notes to the composer band and records answered ones", () => {
+    const now = DateTime.makeUnsafe("2026-06-20T00:00:00.000Z");
+    const notice = (id: string, resolution?: "knew") => ({
+      id: TurnItemId.make(id),
+      threadId: ThreadId.make("thread-heads-up"),
+      runId: null,
+      nodeId: null,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 0,
+      status: "completed" as const,
+      title: null,
+      startedAt: now,
+      completedAt: now,
+      updatedAt: now,
+      type: "system_notice" as const,
+      message: "[ysk:n1] Heads up · Tests are skipped",
+      headsUp: {
+        noteId: id,
+        tag: "Heads up",
+        line: "Tests are skipped",
+        ...(resolution === undefined ? {} : { resolution }),
+      },
+    });
+    const entries = deriveTimelineEntriesFromVisibleTurnItems({
+      visibleTurnItems: [notice("item-open"), notice("item-answered", "knew")].map(
+        (item, position) => ({
+          position,
+          visibility: "local" as const,
+          sourceThreadId: item.threadId,
+          sourceItemId: item.id,
+          item,
+        }),
+      ),
+      optimisticMessages: [],
+    });
+
+    expect(
+      entries.map((entry) => [entry.id, entry.kind === "work" ? entry.entry.label : null]),
+    ).toEqual([["item-answered", "\u2726 Heads up \u00b7 Tests are skipped (knew this)"]]);
+  });
+
   it.each(["pending", "running", "completed"] as const)(
     "keeps %s task progress available to the composer and out of the timeline",
     (stepStatus) => {
