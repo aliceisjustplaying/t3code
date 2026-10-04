@@ -147,6 +147,13 @@ export type TimelineEntry = (
   readonly attempt?: TimelineAttempt;
 };
 
+const HEADS_UP_LABEL = {
+  knew: "knew this",
+  dismiss: "dismissed",
+  learn: "explained",
+  send: "sent to agent",
+} as const;
+
 export function workLogEntryIsToolLike(entry: WorkLogEntry): boolean {
   return (
     entry.tone === "tool" ||
@@ -478,11 +485,16 @@ function projectedWorkEntry(row: OrchestrationV2ProjectedTurnItem): WorkLogEntry
         toolData: item,
       };
     case "system_notice":
-      return {
-        ...common,
-        label: item.message,
-        sourceActivityKind: "runtime.warning",
-      };
+      // Only answered heads-up notes reach the timeline, as a record of the answer.
+      return item.headsUp?.resolution === undefined
+        ? { ...common, label: item.message, sourceActivityKind: "runtime.warning" }
+        : {
+            ...common,
+            label: `\u2726 ${item.headsUp.tag} \u00b7 ${item.headsUp.line} (${
+              HEADS_UP_LABEL[item.headsUp.resolution]
+            })`,
+            sourceActivityKind: "runtime.notice",
+          };
     case "error": {
       const presentation = providerErrorPresentation(item);
       return {
@@ -601,6 +613,10 @@ export function deriveTimelineEntriesFromVisibleTurnItems(
     // Task progress belongs in the composer, not between conversation entries.
     if (item.type === "todo_list" || item.type === "checkpoint") continue;
     if (item.type === "user_message" && foldedAnswerMessageIds.has(item.messageId)) continue;
+    // An open heads-up lives in the composer band; it joins the timeline once answered.
+    if (item.type === "system_notice" && item.headsUp && item.headsUp.resolution === undefined) {
+      continue;
+    }
     const createdAt = projectedItemCreatedAt(row);
     const attempt = resolveAttempt(item);
     const attemptMetadata = attempt === undefined ? {} : { attempt };

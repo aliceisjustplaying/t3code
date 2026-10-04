@@ -415,6 +415,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "queued-run.edit":
     case "runtime-request.respond":
     case "thread.user-input.dismiss":
+    case "thread.heads-up.resolve":
     case "checkpoint.rollback":
     case "checkpoint.rollback.fail":
     case "thread.background-work.settle":
@@ -7036,6 +7037,59 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ]);
     });
 
+  const dispatchThreadHeadsUpResolve = (
+    command: Extract<OrchestrationV2Command, { readonly type: "thread.heads-up.resolve" }>,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
+  ) =>
+    Effect.gen(function* () {
+      const projection = yield* loadProjectionForCommand(command, ["turnItems"], {
+        turnItemTypes: ["system_notice"],
+      });
+      const item = projection.turnItems.find((candidate) => candidate.id === command.turnItemId);
+      if (item?.type !== "system_notice" || item.headsUp === undefined) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "This heads-up no longer exists.",
+        });
+      }
+      const { resolution: _previous, ...headsUp } = item.headsUp;
+      const now = yield* DateTime.now;
+      yield* emit(
+        events,
+        command,
+      )({
+        type: "turn-item.updated",
+        threadId: command.threadId,
+        ...(item.runId === null ? {} : { runId: item.runId }),
+        ...(item.nodeId === null ? {} : { nodeId: item.nodeId }),
+        occurredAt: now,
+        payload: {
+          ...item,
+          headsUp:
+            command.resolution === null ? headsUp : { ...headsUp, resolution: command.resolution },
+          updatedAt: now,
+        },
+      });
+      // Undo must reach the source too, so it can forget a previous Knew answer.
+      const { resolution } = command;
+      const { providerThreadId } = item;
+      if (providerThreadId === null) return;
+      const answer: PendingOrchestrationEffectV2 = {
+        id: `effect:${command.commandId}:provider-heads-up.answer`,
+        commandId: command.commandId,
+        threadId: command.threadId,
+        request: {
+          type: "provider-heads-up.answer",
+          providerThreadId,
+          noteId: headsUp.noteId,
+          resolution,
+        },
+      };
+      yield* Ref.update(effects, (existing) => [...existing, answer]);
+    });
+
   const dispatchThreadUserInputDismiss = (
     command: Extract<OrchestrationV2Command, { readonly type: "thread.user-input.dismiss" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
@@ -9567,6 +9621,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         break;
       case "thread.user-input.dismiss":
         yield* dispatchThreadUserInputDismiss(command, events, effects);
+        break;
+      case "thread.heads-up.resolve":
+        yield* dispatchThreadHeadsUpResolve(command, events, effects);
         break;
       case "run.interrupt":
         cancelUnsettledEffects = yield* dispatchRunInterrupt(command, events, effects);
