@@ -1,4 +1,3 @@
-import * as HeadsUpExplainService from "./orchestration-v2/HeadsUpExplainService.ts";
 import type { RelayManagedEndpointRuntimeConfig } from "@t3tools/contracts/relay";
 import * as Clock from "effect/Clock";
 import * as Random from "effect/Random";
@@ -459,7 +458,6 @@ const OrchestrationV2RuntimeLayerLive = OrchestrationV2ProductionLayerLive.pipe(
 );
 
 const OrchestrationApplicationLayerLive = CheckpointDiffQuery.layer.pipe(
-  Layer.provideMerge(HeadsUpExplainService.layer),
   Layer.provideMerge(CheckpointStoreLayerLive),
   Layer.provideMerge(OrchestrationV2RuntimeLayerLive),
 );
