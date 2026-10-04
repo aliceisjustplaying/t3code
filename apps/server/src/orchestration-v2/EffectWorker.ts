@@ -384,7 +384,7 @@ export const layerExecutor: Layer.Layer<
               const session = yield* providerSessions.get(providerThread.providerSessionId);
               let runtime = Option.getOrUndefined(session);
               if (runtime === undefined) {
-                if (providerThread.driver !== "pi" && providerThread.driver !== "claude") return;
+                if (providerThread.driver !== "pi") return;
                 const projection = yield* threads.getThreadProjection(effect.threadId);
                 const previous = projection.providerSessions.find(
                   (candidate) => candidate.id === providerThread.providerSessionId,
