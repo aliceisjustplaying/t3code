@@ -71,6 +71,7 @@ import {
 import { mergeProviderInstanceEnvironment } from "../../provider/ProviderInstanceEnvironment.ts";
 import * as IdAllocator from "../IdAllocator.ts";
 import * as ProviderAdapter from "../ProviderAdapter.ts";
+import * as ProviderContinuationRequests from "../ProviderContinuationRequests.ts";
 import {
   ProviderAdapterDriverCreateError,
   type ProviderAdapterDriver,
@@ -111,7 +112,7 @@ const PI_REQUEST_TIMEOUT_MS = 15_000;
 const PI_SESSION_TIMEOUT_MS = 60_000;
 const PI_SKILL_DISCOVERY_TIMEOUT_MS = 4_000;
 const PI_UNSOLICITED_ACTIVITY_ERROR =
-  "Pi started agent work outside an active T3 turn. The session was stopped to prevent invisible tool execution.";
+  "Pi started agent work before T3 registered a thread. The session was stopped to prevent invisible tool execution.";
 const SETTLE_PROBE_MAX_ATTEMPTS = 3;
 const SETTLE_PROBE_RETRY_DELAY = Duration.millis(100);
 
@@ -227,6 +228,11 @@ export interface PiAdapterV2Options {
   readonly fileSystem: FileSystem.FileSystem;
   readonly idAllocator: IdAllocator.IdAllocatorV2["Service"];
   readonly serverConfig: ServerConfig.ServerConfig["Service"];
+  readonly continuationRequests?: {
+    readonly offer: (
+      request: ProviderContinuationRequests.ProviderContinuationRequest,
+    ) => Effect.Effect<void>;
+  };
 }
 
 /** Concatenate the `text` fields of a Pi content-block array. */
@@ -371,6 +377,7 @@ export function makePiAdapterV2(
   options: PiAdapterV2Options,
 ): ProviderAdapter.ProviderAdapterV2Shape {
   const { idAllocator } = options;
+  const continuationRequests = options.continuationRequests ?? { offer: () => Effect.void };
 
   const protocolError = (detail: string, payload?: unknown) =>
     new ProviderAdapter.ProviderAdapterProtocolError({
@@ -475,10 +482,14 @@ export function makePiAdapterV2(
       // Keep that intent beyond turn finalization so the later stdout close is
       // not mistaken for an unexpected transport failure.
       let stopRequested = false;
-      // Pi extensions can trigger an agent turn after the owning T3 turn has
-      // settled. Until orchestration has a first-class provider-initiated run,
-      // stop that runtime before it can execute tools without a timeline owner.
+      // Agent work Pi starts with no T3 thread to own it is stopped.
       let unsolicitedActivityDetected = false;
+      /**
+       * An agent run Pi started with no T3 turn, such as an extension's wake
+       * turn. Its events are held for the continuation turn it asks the
+       * orchestrator for, or for a user turn that starts first.
+       */
+      let wake: { readonly events: Array<PiRpcRecord>; dropped: boolean } | null = null;
       let appliedModel: string | null = null;
       let appliedThinking: string | null = null;
       /** Last thread title synced into pi's session name (`/resume` listing). */
@@ -1552,11 +1563,44 @@ export function makePiAdapterV2(
         );
       };
 
+      const holdWake = Effect.fnUntraced(function* (state: PiThreadState, event: PiRpcRecord) {
+        const held = { events: [event], dropped: false };
+        wake = held;
+        yield* Effect.logInfo("Pi started a turn on its own; asking for a continuation.", {
+          providerThreadId: state.providerThread.id,
+        });
+        yield* continuationRequests.offer({
+          threadId: state.providerThread.appThreadId ?? input.threadId,
+          providerThreadId: state.providerThread.id,
+          driver: PI_PROVIDER,
+          detail: null,
+          dispatchIfCurrent: (dispatch) =>
+            held.dropped ? Effect.succeed(Option.none()) : Effect.map(dispatch, Option.some),
+          // No turn will take it (the thread was archived): stop the run.
+          clearIfCurrent: () =>
+            Effect.gen(function* () {
+              if (held.dropped) return;
+              held.dropped = true;
+              if (wake === held) wake = null;
+              yield* connection.send({ type: "abort" }).pipe(Effect.ignore);
+            }),
+        });
+      });
+
       const handleSessionEvent = Effect.fnUntraced(function* (event: PiRpcRecord) {
         const state = threadState;
         const turn = state?.activeTurn ?? null;
+        const type = String(event["type"]);
+        if (wake !== null && turn === null && type !== "response" && !type.startsWith("t3.")) {
+          wake.events.push(event);
+          return;
+        }
         switch (event["type"]) {
           case "agent_start": {
+            if (turn === null && state !== null) {
+              yield* holdWake(state, event);
+              return;
+            }
             if (turn === null) {
               unsolicitedActivityDetected = true;
               yield* updateProviderSession("error", PI_UNSOLICITED_ACTIVITY_ERROR);
@@ -2305,11 +2349,21 @@ export function makePiAdapterV2(
             // extension's before_agent_start system-prompt hook, never by
             // wrapping the user text: a wrapped first message would no
             // longer start with "/" and slash commands would stop expanding.
-            const compactCommand = parsePiCompactCommand(turnInput.message.text);
+            // A continuation turn owns a run Pi started on its own (see
+            // `holdWake`) and sends no prompt.
+            const continuation =
+              turnInput.message.createdBy === "agent" &&
+              turnInput.message.creationSource === "provider";
+            const compactCommand = continuation
+              ? null
+              : parsePiCompactCommand(turnInput.message.text);
             const payload =
-              compactCommand === null
-                ? yield* resolvePromptPayload(turnInput.message.text, turnInput.message.attachments)
-                : null;
+              continuation || compactCommand !== null
+                ? null
+                : yield* resolvePromptPayload(
+                    turnInput.message.text,
+                    turnInput.message.attachments,
+                  );
             const startedAt = yield* DateTime.now;
             const syntheticNativeTurnId = `${state.providerThread.id}:attempt:${turnInput.attemptId}`;
             const providerTurn: OrchestrationV2ProviderTurn = {
@@ -2388,6 +2442,13 @@ export function makePiAdapterV2(
               if (outOfTurnExtensionErrors.length > 0) {
                 yield* Queue.offer(connection.events, { type: "t3.flush_extension_errors" });
               }
+              // Whichever turn starts first takes a held run; the other
+              // continuation finds nothing and settles once Pi is idle.
+              const held = wake;
+              wake = null;
+              if (held !== null) held.dropped = true;
+              for (const event of held?.events ?? []) yield* handleSessionEvent(event);
+              if (continuation && held === null) yield* scheduleSettleProbe(activeTurn);
             }).pipe(
               sessionEventPermit.withPermits(1),
               Effect.tapError(() =>
@@ -2968,6 +3029,7 @@ export const PiAdapterV2Driver: ProviderAdapterDriver<PiSettings, PiAdapterV2Dri
       const fileSystem = yield* FileSystem.FileSystem;
       const idAllocator = yield* IdAllocator.IdAllocatorV2;
       const serverConfig = yield* ServerConfig.ServerConfig;
+      const continuationRequests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
       return makePiAdapterV2({
         instanceId: input.instanceId,
         settings: { ...input.config, enabled: input.enabled },
@@ -2976,6 +3038,7 @@ export const PiAdapterV2Driver: ProviderAdapterDriver<PiSettings, PiAdapterV2Dri
         fileSystem,
         idAllocator,
         serverConfig,
+        continuationRequests,
       });
     },
     (effect, input) =>
@@ -3002,6 +3065,7 @@ const layer: Layer.Layer<ProviderAdapter.ProviderAdapterV2, never, PiAdapterV2Dr
       const fileSystem = yield* FileSystem.FileSystem;
       const idAllocator = yield* IdAllocator.IdAllocatorV2;
       const serverConfig = yield* ServerConfig.ServerConfig;
+      const continuationRequests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
       return makePiAdapterV2({
         instanceId: PI_DEFAULT_INSTANCE_ID,
         settings: DEFAULT_PI_SETTINGS,
@@ -3010,6 +3074,7 @@ const layer: Layer.Layer<ProviderAdapter.ProviderAdapterV2, never, PiAdapterV2Dr
         fileSystem,
         idAllocator,
         serverConfig,
+        continuationRequests,
       });
     }),
   );
