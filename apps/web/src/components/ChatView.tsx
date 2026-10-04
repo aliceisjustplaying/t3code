@@ -473,6 +473,7 @@ import {
 } from "./chat/QueuedRunsControl";
 import { useLinkedThreadPullRequest } from "./ThreadStatusIndicators";
 import type { ComposerBannerStackItem } from "./chat/ComposerBannerStack";
+import { useHeadsUpBand } from "./chat/HeadsUpBand";
 import { ComposerSurface } from "./chat/ComposerSurface";
 import { resolveThreadSyncPhase } from "../threadSync";
 import {
@@ -7620,6 +7621,15 @@ export default function ChatView(props: ChatViewProps) {
     usageLimitsBanner,
     wokeThreadBannerItem,
   ]);
+  const headsUp = useHeadsUpBand({
+    environmentId: isServerThread ? (activeThread?.environmentId ?? null) : null,
+    threadId: isServerThread ? (activeThread?.id ?? null) : null,
+    turnItems: serverProjection?.turnItems ?? null,
+    cwd: gitCwd ?? undefined,
+    runtimeMode,
+    interactionMode,
+    bannerItems: composerBannerItems,
+  });
 
   useEffect(() => {
     setPendingServerThreadEnvMode(null);
@@ -11133,6 +11143,7 @@ export default function ChatView(props: ChatViewProps) {
                   : "pointer-events-none absolute inset-x-0 bottom-0 z-20 pt-1.5 sm:pt-2"
               }
             >
+              {headsUp.overlay}
               <div
                 ref={draftHeroTransition.transitionGroupRef}
                 className="chat-composer-lane w-full"
@@ -11271,7 +11282,7 @@ export default function ChatView(props: ChatViewProps) {
                                   />
                                 ) : null
                               }
-                              bannerItems={composerBannerItems}
+                              bannerItems={headsUp.bannerItems}
                               // With attachments or contexts aboard the pick just inserts the
                               // text, so it sends as a prompt like the typed path would.
                               onUsageLimitsCommand={
