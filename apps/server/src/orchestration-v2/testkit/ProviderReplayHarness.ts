@@ -455,6 +455,7 @@ export function layerWithRegistry<Error>(
         )
       : Layer.empty;
   const layerEffectExecutorProvided = EffectWorker.layerExecutor.pipe(
+    Layer.provide(layerRuntime),
     Layer.provide(
       Layer.mergeAll(
         layerRunFinalizationServiceProvided,
