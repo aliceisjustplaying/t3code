@@ -2,6 +2,8 @@
 # Rebuilds the `fork-stack` branch: upstream/main, then each PR in prs.txt, then `ours`.
 # Reads prs.txt from `ours`. Needs a clean worktree. Conflict resolutions recorded in
 # rr-cache/ (copied from .git/rr-cache after resolving) are replayed by rerere.
+# fixups/<pr>.patch, if present, is committed after all PR merges, for fixes to a PR's
+# own code that `ours` cannot carry.
 set -euo pipefail
 
 merge() {
@@ -30,6 +32,14 @@ main() {
   for pr in $prs; do
     git fetch upstream "pull/$pr/head"
     merge FETCH_HEAD "Merge upstream PR #$pr"
+  done
+  # After every PR, so a fixup cannot change a later merge's conflicts and void
+  # its rerere resolution.
+  for pr in $prs; do
+    if git cat-file -e "ours:scripts/fork/fixups/$pr.patch" 2>/dev/null; then
+      git show "ours:scripts/fork/fixups/$pr.patch" | git apply --index
+      git commit -m "Fix up upstream PR #$pr"
+    fi
   done
   merge ours "Merge ours"
 }
