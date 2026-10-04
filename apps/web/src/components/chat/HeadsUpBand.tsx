@@ -12,6 +12,7 @@ import type {
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
+import { ChevronDownIcon } from "lucide-react";
 import { useCallback, useMemo, useState, type KeyboardEvent } from "react";
 
 import { cn, newMessageId } from "~/lib/utils";
@@ -30,13 +31,15 @@ import {
 } from "../ui/dialog";
 import { Kbd } from "../ui/kbd";
 import { stackedThreadToast, toastManager } from "../ui/toast";
+import { ComposerBanner } from "./ComposerBanner";
 import type { ComposerBannerStackItem } from "./ComposerBannerStack";
 
 /**
- * Heads-up notes ("you should know") pinned above the composer. The oldest open
- * note leads the composer banners; "+N more" lists the rest. A note stays until
- * the user answers it here, and every answer but "Ask agent" can be undone.
- * Returns the composer's banner items with the note added, and the dialogs to mount.
+ * Heads-up notes ("you should know") pinned above the composer as one band. The
+ * oldest open note leads it; "N more" expands the rest below it as a compact
+ * list with the same answers. A note stays until the user answers it here, and
+ * every answer but "Ask agent" can be undone. Returns the composer's banner
+ * items with the band added, and the explanation dialog to mount.
  */
 export function useHeadsUpBand(input: {
   readonly environmentId: EnvironmentId | null;
@@ -58,8 +61,7 @@ export function useHeadsUpBand(input: {
   const resolveHeadsUp = useAtomCommand(threadEnvironment.resolveHeadsUp);
   const startTurn = useAtomCommand(threadEnvironment.startTurn);
   const [explained, setExplained] = useState<PendingHeadsUp | null>(null);
-  const [triageOpen, setTriageOpen] = useState(false);
-  const [focusIndex, setFocusIndex] = useState(0);
+  const [listOpen, setListOpen] = useState(false);
 
   const setResolution = useCallback(
     (ids: ReadonlyArray<TurnItemId>, resolution: OrchestrationV2HeadsUpAction | null) => {
@@ -137,56 +139,69 @@ export function useHeadsUpBand(input: {
     [askAgent, offerUndo, setResolution],
   );
 
-  const openTriage = useCallback(() => {
-    setFocusIndex(0);
-    setTriageOpen(true);
-  }, []);
-
   const bannerItems = useMemo<ReadonlyArray<ComposerBannerStackItem>>(() => {
     if (top === null) return input.bannerItems;
-    const more = notes.length - 1;
+    const rest = notes.slice(1);
+    const expanded = listOpen && rest.length > 0;
     const item: ComposerBannerStackItem = {
       id: "heads-up",
       variant: "info",
       icon: <span className="text-primary">{"\u2726"}</span>,
-      title: <NoteText note={top} primary />,
+      title: top.tag,
+      description: <InlineNoteText text={top.line} />,
       actions: (
         <>
-          {more > 0 ? (
-            <Button size="xs" variant="ghost" onClick={openTriage}>
-              +{more} more
+          {rest.length > 0 ? (
+            <Button
+              size="xs"
+              variant="ghost-muted"
+              aria-expanded={expanded}
+              aria-label={`${rest.length} more heads-up${rest.length === 1 ? "" : "s"}`}
+              onClick={() => setListOpen(!expanded)}
+            >
+              {rest.length}
+              <span className="@max-[400px]:hidden">more</span>
+              <ChevronDownIcon className={cn("size-3.5", !expanded && "rotate-180")} />
             </Button>
           ) : null}
-          {noteActions(top).map(([action, label]) => (
-            <Button key={action} size="xs" variant="ghost" onClick={() => act(top, action)}>
-              {label}
-            </Button>
-          ))}
+          <NoteActions note={top} onAct={act} />
         </>
       ),
       dismissLabel: "Dismiss heads-up",
       onDismiss: () => act(top, "dismiss"),
+      ...(expanded
+        ? {
+            children: (
+              <ComposerBanner.Scroll className="max-h-[min(12rem,30dvh)]">
+                <ComposerBanner.Children render={<ul role="list" />} aria-label="More heads-ups">
+                  {rest.map((note) => (
+                    <ComposerBanner.Row key={note.turnItemId} render={<li />} layout="wrap-actions">
+                      <ComposerBanner.Icon />
+                      {/* Wraps instead of truncating: the list is where a long note is read. */}
+                      <ComposerBanner.Content className="block py-1 wrap-anywhere text-muted-foreground">
+                        {note.tag === top.tag ? null : (
+                          <span className="me-1 font-medium text-foreground">{note.tag}</span>
+                        )}
+                        <InlineNoteText text={note.line} />
+                      </ComposerBanner.Content>
+                      <ComposerBanner.Actions>
+                        <NoteActions note={note} onAct={act} />
+                        <ComposerBanner.Dismiss
+                          aria-label="Dismiss heads-up"
+                          onClick={() => act(note, "dismiss")}
+                        />
+                      </ComposerBanner.Actions>
+                    </ComposerBanner.Row>
+                  ))}
+                </ComposerBanner.Children>
+              </ComposerBanner.Scroll>
+            ),
+          }
+        : {}),
     };
     return [item, ...input.bannerItems];
-  }, [act, input.bannerItems, notes.length, openTriage, top]);
+  }, [act, input.bannerItems, listOpen, notes, top]);
 
-  const focused = notes[Math.min(focusIndex, notes.length - 1)] ?? null;
-  const onTriageKey = (event: KeyboardEvent) => {
-    if (focused === null || event.metaKey || event.ctrlKey || event.altKey) return;
-    const last = notes.length - 1;
-    const run =
-      event.key === "ArrowDown"
-        ? () => setFocusIndex(Math.min(last, focusIndex + 1))
-        : event.key === "ArrowUp"
-          ? () => setFocusIndex(Math.max(0, focusIndex - 1))
-          : (() => {
-              const action = noteActions(focused).find(([, , key]) => key === event.key)?.[0];
-              return action === undefined ? null : () => act(focused, action);
-            })();
-    if (run === null) return;
-    event.preventDefault();
-    run();
-  };
   const closeExplanation = () => setExplained(null);
   const onExplanationKey = (event: KeyboardEvent) => {
     if (explained === null || event.key !== "a" || event.metaKey || event.ctrlKey) return;
@@ -196,115 +211,61 @@ export function useHeadsUpBand(input: {
   };
 
   const overlay = (
-    <>
-      <Dialog
-        open={triageOpen && focused !== null}
-        onOpenChange={(next) => (next ? undefined : setTriageOpen(false))}
-      >
-        {triageOpen && focused !== null ? (
-          <DialogPopup className="max-w-xl" onKeyDown={onTriageKey}>
-            <DialogHeader>
-              <DialogTitle>
-                {"\u2726"} {notes.length} open heads-up{notes.length === 1 ? "" : "s"}
-              </DialogTitle>
-            </DialogHeader>
-            {/* Fixed sizes: removing notes or moving the pointer never reflows. */}
-            <div className="flex h-[22rem] flex-col gap-3 px-6 pb-2">
-              <ul
-                className="min-h-0 flex-1 overflow-y-auto"
-                role="listbox"
-                aria-label="Open heads-ups"
-              >
-                {notes.map((note, index) => (
-                  <li
-                    key={note.turnItemId}
-                    role="option"
-                    aria-selected={note === focused}
-                    onClick={() => setFocusIndex(index)}
-                    className={cn(
-                      "flex h-8 cursor-default items-center rounded-md px-2 text-sm",
-                      note === focused && "bg-accent",
-                    )}
-                  >
-                    <NoteText note={note} primary={note === focused} />
-                  </li>
-                ))}
-              </ul>
-              <div className="h-24 shrink-0 overflow-y-auto rounded-md border px-3 py-2 text-sm">
-                <p>
-                  <InlineNoteText text={focused.line} />
-                </p>
-                {focused.evidence ? (
-                  <p className="mt-1 text-muted-foreground text-xs">
-                    <InlineNoteText text={focused.evidence} />
-                  </p>
-                ) : null}
-              </div>
-            </div>
-            <DialogFooter variant="bare" className="sm:justify-start">
-              <span className="flex flex-wrap items-center gap-1">
-                {noteActions(focused).map(([action, label, key]) => (
-                  <Button
-                    key={action}
-                    size="xs"
-                    variant="ghost"
-                    onClick={() => act(focused, action)}
-                  >
-                    {label}
-                    <Kbd>{key}</Kbd>
-                  </Button>
-                ))}
-              </span>
-            </DialogFooter>
-          </DialogPopup>
-        ) : null}
-      </Dialog>
-      <Dialog
-        open={explained !== null}
-        onOpenChange={(next) => (next ? undefined : closeExplanation())}
-      >
-        {explained === null ? null : (
-          <DialogPopup className="max-w-xl" onKeyDown={onExplanationKey}>
-            <DialogHeader>
-              <DialogTitle className="sr-only">
-                {explained.tag}: {explained.line}
-              </DialogTitle>
-              <NoteHeader note={explained} className="pe-8" />
-            </DialogHeader>
-            <DialogPanel>
-              <ChatMarkdown text={explained.explanation ?? ""} cwd={cwd} />
-            </DialogPanel>
-            <DialogFooter>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => {
-                  closeExplanation();
-                  askAgent(explained);
-                }}
-              >
-                Ask agent
-                <Kbd>a</Kbd>
-              </Button>
-              <Button size="sm" onClick={closeExplanation}>
-                Understood
-              </Button>
-            </DialogFooter>
-          </DialogPopup>
-        )}
-      </Dialog>
-    </>
+    <Dialog
+      open={explained !== null}
+      onOpenChange={(next) => (next ? undefined : closeExplanation())}
+    >
+      {explained === null ? null : (
+        <DialogPopup className="max-w-xl" onKeyDown={onExplanationKey}>
+          <DialogHeader>
+            <DialogTitle className="sr-only">
+              {explained.tag}: {explained.line}
+            </DialogTitle>
+            <NoteHeader note={explained} className="pe-8" />
+          </DialogHeader>
+          <DialogPanel>
+            <ChatMarkdown text={explained.explanation ?? ""} cwd={cwd} />
+          </DialogPanel>
+          <DialogFooter>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                closeExplanation();
+                askAgent(explained);
+              }}
+            >
+              Ask agent
+              <Kbd>a</Kbd>
+            </Button>
+            <Button size="sm" onClick={closeExplanation}>
+              Understood
+            </Button>
+          </DialogFooter>
+        </DialogPopup>
+      )}
+    </Dialog>
   );
 
   return { bannerItems, overlay };
 }
 
-/** The answers a note offers, with their key in the triage list; mirrors Pi's /ysk menu. */
-function noteActions(note: PendingHeadsUp) {
-  const actions: Array<readonly [OrchestrationV2HeadsUpAction, string, string]> = [];
-  if (note.explanation) actions.push(["learn", "Explain", "e"]);
-  actions.push(["knew", "Knew", "k"], ["send", "Ask agent", "a"], ["dismiss", "Dismiss", "x"]);
-  return actions;
+/** A note's answers besides Dismiss, which is the row's close button; mirrors Pi's /ysk menu. */
+function NoteActions({
+  note,
+  onAct,
+}: {
+  note: PendingHeadsUp;
+  onAct: (note: PendingHeadsUp, action: OrchestrationV2HeadsUpAction) => void;
+}) {
+  const actions: Array<readonly [OrchestrationV2HeadsUpAction, string]> = [];
+  if (note.explanation) actions.push(["learn", "Explain"]);
+  actions.push(["knew", "Knew"], ["send", "Ask agent"]);
+  return actions.map(([action, label]) => (
+    <Button key={action} size="xs" variant="ghost" onClick={() => onAct(note, action)}>
+      {label}
+    </Button>
+  ));
 }
 
 /** Renders `code spans` in a note; the rest stays plain text. */
@@ -325,20 +286,6 @@ function InlineNoteText({ text }: { text: string }) {
         );
       })}
     </>
-  );
-}
-
-function NoteText({ note, primary = false }: { note: PendingHeadsUp; primary?: boolean }) {
-  return (
-    <span className="flex min-w-0 items-baseline gap-1">
-      <span className={primary ? "shrink-0 font-medium" : "shrink-0 text-muted-foreground"}>
-        {note.tag}
-      </span>
-      <span className="shrink-0 text-muted-foreground">{"\u00b7"}</span>
-      <span className="min-w-0 truncate text-foreground/85">
-        <InlineNoteText text={note.line} />
-      </span>
-    </span>
   );
 }
 
