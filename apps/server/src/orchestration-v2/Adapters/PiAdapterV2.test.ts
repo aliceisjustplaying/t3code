@@ -1713,6 +1713,47 @@ describe("PiAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  it.effect("passes a heads-up answer to the you-should-know command only", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      const answer = runtime.answerHeadsUp!;
+      const opening = fake.allRequests().length;
+      const sent = () =>
+        fake
+          .allRequests()
+          .slice(opening)
+          .filter((record) => record["type"] === "prompt" || record["type"] === "get_commands")
+          .map((record) => record["message"] ?? record["type"]);
+
+      // A prompt template named ysk would go to the model, so it does not count.
+      fake.queueCommands({ commands: [{ name: "ysk", source: "prompt" }] });
+      yield* answer({ providerThread, noteId: "k3x9", resolution: "knew" });
+      // A note from another native session was never in this process.
+      yield* answer({
+        providerThread: {
+          ...providerThread,
+          nativeThreadRef: {
+            driver: PI_PROVIDER,
+            nativeId: "/fake/other.jsonl",
+            strength: "strong",
+          },
+        },
+        noteId: "k3x9",
+        resolution: "knew",
+      });
+      fake.queueCommands({ commands: [{ name: "ysk", source: "extension" }] });
+      yield* answer({ providerThread, noteId: "k3x9", resolution: "dismiss" });
+
+      assert.deepEqual(sent(), ["get_commands", "get_commands", "/ysk answer k3x9 dismiss"]);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("keeps snapshot message identities distinct across native sessions", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
