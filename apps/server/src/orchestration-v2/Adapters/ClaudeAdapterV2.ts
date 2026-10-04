@@ -1,5 +1,3 @@
-import * as NodeOS from "node:os";
-
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
 import {
   dynamicToolTitle,
@@ -170,16 +168,6 @@ export function claudeProviderTurnTokenUsage(
   };
 }
 export const CLAUDE_DEFAULT_INSTANCE_ID = defaultInstanceIdForDriver(CLAUDE_PROVIDER);
-const encodeHeadsUpFeedback = Schema.encodeEffect(
-  Schema.fromJsonString(
-    Schema.Struct({
-      noteId: Schema.String,
-      action: Schema.String,
-      at: Schema.String,
-    }),
-  ),
-);
-
 const DEFAULT_CLAUDE_SETTINGS = Schema.decodeSync(ClaudeSettings)({});
 
 export const ClaudeProviderCapabilitiesV2 = {
@@ -6021,8 +6009,7 @@ export function makeClaudeAdapterV2(
           // `informational` carries hook `systemMessage` output, such as heads-up notes.
           if (
             message.type === "system" &&
-            (message.subtype === "model_refusal_fallback" ||
-              (message.subtype === "informational" && message.content.includes("[ysk:")))
+            (message.subtype === "model_refusal_fallback" || message.subtype === "informational")
           ) {
             const now = yield* DateTime.now;
             const nativeItemId = message.uuid;
@@ -7852,31 +7839,6 @@ export function makeClaudeAdapterV2(
           getModelContextWindow: (selection) =>
             resolveClaudeCatalogContextWindowTokens(BUNDLED_CLAUDE_MODEL_CATALOG, selection),
           events: Stream.fromEffectRepeat(Queue.take(events)),
-          answerHeadsUp: (answer) =>
-            Effect.gen(function* () {
-              const feedbackPath = path.join(
-                NodeOS.homedir(),
-                ".claude",
-                "you-should-know",
-                "feedback.jsonl",
-              );
-              const line = yield* encodeHeadsUpFeedback({
-                noteId: answer.noteId,
-                action: answer.resolution ?? "undo",
-                at: DateTime.formatIso(yield* DateTime.now),
-              });
-              yield* fileSystem.makeDirectory(path.dirname(feedbackPath), { recursive: true });
-              yield* fileSystem.writeFileString(feedbackPath, line + "\n", { flag: "a" });
-            }).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new ProviderAdapter.ProviderAdapterProtocolError({
-                    driver: CLAUDE_PROVIDER,
-                    detail: "Could not save heads-up feedback",
-                    cause,
-                  }),
-              ),
-            ),
           hasPendingBackgroundWork: Effect.gen(function* () {
             // Session capability: any native thread with pending work pins idle.
             for (const roster of (yield* Ref.get(pendingBackgroundTasksByNativeThread)).values()) {

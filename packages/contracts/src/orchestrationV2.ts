@@ -1330,30 +1330,6 @@ export const OrchestrationV2HeadsUp = Schema.Struct({
 });
 export type OrchestrationV2HeadsUp = typeof OrchestrationV2HeadsUp.Type;
 
-/** How a "Learn more" rewrite should change the previous explanation. */
-export const OrchestrationV2HeadsUpExplainDirection = Schema.Literals([
-  "simpler_words",
-  "less_detail",
-  "more_detail",
-]);
-export type OrchestrationV2HeadsUpExplainDirection =
-  typeof OrchestrationV2HeadsUpExplainDirection.Type;
-
-export const OrchestrationV2HeadsUpExplainInput = Schema.Struct({
-  noteId: Schema.String,
-  direction: Schema.optional(OrchestrationV2HeadsUpExplainDirection),
-  /** The explanation being rewritten; required with `direction`. */
-  previous: Schema.optional(Schema.String),
-});
-export type OrchestrationV2HeadsUpExplainInput = typeof OrchestrationV2HeadsUpExplainInput.Type;
-
-export const OrchestrationV2HeadsUpExplainResult = Schema.Struct({ markdown: Schema.String });
-
-export class OrchestrationExplainHeadsUpError extends Schema.TaggedError<OrchestrationExplainHeadsUpError>()(
-  "OrchestrationExplainHeadsUpError",
-  { message: Schema.String },
-) {}
-
 const OrchestrationV2TurnItemBaseFields = {
   toolNonExecutionKind: Schema.optional(Schema.String),
   toolSurface: Schema.optional(ToolActivitySurface),
@@ -3196,7 +3172,6 @@ export const ORCHESTRATION_V2_WS_METHODS = {
   getArchivedShellSnapshot: "orchestration.getArchivedShellSnapshot",
   getThreadProjection: "orchestration.getThreadProjection",
   getWorkflowScript: "orchestration.getWorkflowScript",
-  explainHeadsUp: "orchestration.explainHeadsUp",
   getTurnItem: "orchestration.getTurnItem",
   launchThread: "orchestration.launchThread",
   subscribeArchivedShell: "orchestration.subscribeArchivedShell",
@@ -3634,10 +3609,6 @@ export const OrchestrationV2RpcSchemas = {
   getThreadProjection: {
     input: OrchestrationV2GetThreadProjectionInput,
     output: OrchestrationV2ThreadProjection,
-  },
-  explainHeadsUp: {
-    input: OrchestrationV2HeadsUpExplainInput,
-    output: OrchestrationV2HeadsUpExplainResult,
   },
   getWorkflowScript: {
     input: OrchestrationV2GetWorkflowScriptInput,

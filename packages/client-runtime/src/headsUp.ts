@@ -6,7 +6,6 @@ import type {
 
 export interface PendingHeadsUp extends OrchestrationV2HeadsUp {
   readonly turnItemId: TurnItemId;
-  readonly canRequestExplanation?: boolean;
 }
 
 /** Every unresolved heads-up note, oldest first. The first is the one the band acts on. */
@@ -17,11 +16,7 @@ export function pendingHeadsUps(
   for (const item of items) {
     if (item.type !== "system_notice" || item.headsUp === undefined) continue;
     if (item.headsUp.resolution !== undefined) continue;
-    pending.push({
-      ...item.headsUp,
-      turnItemId: item.id,
-      ...(item.nativeItemRef?.driver === "claude" ? { canRequestExplanation: true } : {}),
-    });
+    pending.push({ ...item.headsUp, turnItemId: item.id });
   }
   return pending;
 }

@@ -5,7 +5,6 @@ import * as Option from "effect/Option";
 import { Atom } from "effect/reactivity";
 import {
   WS_METHODS,
-  ORCHESTRATION_V2_WS_METHODS,
   type EnvironmentId,
   type OrchestrationV2ShellSnapshot,
 } from "@t3tools/contracts";
@@ -307,11 +306,6 @@ export function createThreadEnvironmentAtoms<R, E>(
       execute: (input: DismissThreadUserInputInput) => dismissThreadUserInput(input),
       scheduler,
       concurrency,
-    }),
-    explainHeadsUp: createEnvironmentRpcCommand(runtime, {
-      label: "environment-data:commands:thread:explain-heads-up",
-      tag: ORCHESTRATION_V2_WS_METHODS.explainHeadsUp,
-      scheduler,
     }),
     resolveHeadsUp: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:resolve-heads-up",
