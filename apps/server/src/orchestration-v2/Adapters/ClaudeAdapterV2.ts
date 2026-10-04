@@ -5711,7 +5711,11 @@ export function makeClaudeAdapterV2(
             return;
           }
 
-          if (message.type === "system" && message.subtype === "model_refusal_fallback") {
+          // `informational` carries hook `systemMessage` output, such as heads-up notes.
+          if (
+            message.type === "system" &&
+            (message.subtype === "model_refusal_fallback" || message.subtype === "informational")
+          ) {
             const now = yield* DateTime.now;
             const nativeItemId = message.uuid;
             yield* emitProviderEvent({
