@@ -2831,6 +2831,16 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     )
                     AND request.type = 'run_interrupt_request'
                   UNION
+                  -- Unanswered heads-up notes stay loaded however old, so the band
+                  -- above the composer shows each one until the user acts on it.
+                  SELECT note.ordinal, note.turn_item_id
+                  FROM orchestration_v2_projection_turn_items AS note
+                  WHERE note.thread_id = ${threadId}
+                    AND ${window.anchorItemId ?? null} IS NULL
+                    AND note.type = 'system_notice'
+                    AND json_extract('$.headsUp.noteId') IS NOT NULL
+                    AND json_extract('$.headsUp.resolution') IS NULL
+                  UNION
                   SELECT latest.ordinal, latest.turn_item_id
                   FROM (
                     SELECT ordinal, turn_item_id

@@ -35,6 +35,7 @@ import {
   type RespondToThreadApprovalInput,
   type RespondToThreadUserInputInput,
   type DismissThreadUserInputInput,
+  type ResolveThreadHeadsUpInput,
   type RevertThreadCheckpointInput,
   type SetThreadInteractionModeInput,
   type SetThreadRuntimeModeInput,
@@ -71,6 +72,7 @@ import {
   respondToThreadApproval,
   respondToThreadUserInput,
   dismissThreadUserInput,
+  resolveThreadHeadsUp,
   revertThreadCheckpoint,
   setThreadInteractionMode,
   setThreadRuntimeMode,
@@ -302,6 +304,12 @@ export function createThreadEnvironmentAtoms<R, E>(
     dismissUserInput: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:dismiss-user-input",
       execute: (input: DismissThreadUserInputInput) => dismissThreadUserInput(input),
+      scheduler,
+      concurrency,
+    }),
+    resolveHeadsUp: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:resolve-heads-up",
+      execute: (input: ResolveThreadHeadsUpInput) => resolveThreadHeadsUp(input),
       scheduler,
       concurrency,
     }),

@@ -488,6 +488,7 @@ import { useLinkedThreadPullRequest } from "./ThreadStatusIndicators";
 import type { ComposerBannerStackItem } from "./chat/ComposerBannerStack";
 import { ThreadStatusLine } from "./chat/ThreadStatusLine";
 import { formatRelativeTimeLabel, formatRelativeTimeUntilLabel } from "../timestampFormat";
+import { useHeadsUpBand } from "./chat/HeadsUpBand";
 import { ComposerSurface } from "./chat/ComposerSurface";
 import { resolveThreadSyncPhase } from "../threadSync";
 import {
@@ -7840,6 +7841,15 @@ export default function ChatView(props: ChatViewProps) {
     systemComposerBannerItems,
     usageLimitsBanner,
   ]);
+  const headsUp = useHeadsUpBand({
+    environmentId: isServerThread ? (activeThread?.environmentId ?? null) : null,
+    threadId: isServerThread ? (activeThread?.id ?? null) : null,
+    turnItems: serverProjection?.turnItems ?? null,
+    cwd: gitCwd ?? undefined,
+    runtimeMode,
+    interactionMode,
+    bannerItems: composerBannerItems,
+  });
 
   useEffect(() => {
     setPendingServerThreadEnvMode(null);
@@ -11482,6 +11492,7 @@ export default function ChatView(props: ChatViewProps) {
                   : "pointer-events-none absolute inset-x-0 bottom-0 z-20 pt-1.5 sm:pt-2"
               }
             >
+              {headsUp.overlay}
               <div
                 ref={draftHeroTransition.transitionGroupRef}
                 className="chat-composer-lane w-full"
@@ -11623,7 +11634,7 @@ export default function ChatView(props: ChatViewProps) {
                                   />
                                 ) : null
                               }
-                              bannerItems={composerBannerItems}
+                              bannerItems={headsUp.bannerItems}
                               resumeCompactionTokens={resumeCompactionTokens}
                               keepFullHistory={keepFullHistory}
                               onToggleKeepFullHistory={toggleKeepFullHistory}

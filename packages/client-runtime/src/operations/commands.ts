@@ -25,6 +25,8 @@ import {
   type ThreadId,
   type ThreadEnvMode,
   type UploadChatAttachment,
+  type OrchestrationV2HeadsUpAction,
+  type TurnItemId,
 } from "@t3tools/contracts";
 import { modelSelectionCommandType } from "@t3tools/shared/model";
 import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
@@ -200,6 +202,12 @@ export interface RespondToThreadUserInputInput extends ThreadCommandInput {
 
 export interface DismissThreadUserInputInput extends ThreadCommandInput {
   readonly requestId: RuntimeRequestId;
+}
+
+export interface ResolveThreadHeadsUpInput extends ThreadCommandInput {
+  readonly turnItemId: TurnItemId;
+  /** `null` puts the note back above the composer. */
+  readonly resolution: OrchestrationV2HeadsUpAction | null;
 }
 
 export interface RevertThreadCheckpointInput extends ThreadCommandInput {
@@ -865,6 +873,18 @@ export const dismissThreadUserInput = Effect.fn("EnvironmentCommands.dismissThre
       commandId: yield* allocateCommandId(input),
       threadId: input.threadId,
       requestId: input.requestId,
+    });
+  },
+);
+
+export const resolveThreadHeadsUp = Effect.fn("EnvironmentCommands.resolveThreadHeadsUp")(
+  function* (input: ResolveThreadHeadsUpInput) {
+    return yield* dispatch({
+      type: "thread.heads-up.resolve",
+      commandId: yield* allocateCommandId(input),
+      threadId: input.threadId,
+      turnItemId: input.turnItemId,
+      resolution: input.resolution,
     });
   },
 );

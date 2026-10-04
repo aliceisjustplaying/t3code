@@ -1311,6 +1311,25 @@ export const OrchestrationV2UserMessageInputIntent = Schema.Literals([
 export type OrchestrationV2UserMessageInputIntent =
   typeof OrchestrationV2UserMessageInputIntent.Type;
 
+/** What the user did with a heads-up note. */
+export const OrchestrationV2HeadsUpAction = Schema.Literals(["knew", "dismiss", "learn", "send"]);
+export type OrchestrationV2HeadsUpAction = typeof OrchestrationV2HeadsUpAction.Type;
+
+/**
+ * A "you should know" note a provider surfaced as `[ysk:<id>] <tag> · <line>`.
+ * Unresolved notes are pinned above the composer; `resolution` takes one out.
+ */
+export const OrchestrationV2HeadsUp = Schema.Struct({
+  noteId: Schema.String,
+  tag: Schema.String,
+  line: Schema.String,
+  evidence: Schema.optional(Schema.String),
+  /** Markdown the note's source wrote ahead of time, shown by "Explain". */
+  explanation: Schema.optional(Schema.String),
+  resolution: Schema.optional(OrchestrationV2HeadsUpAction),
+});
+export type OrchestrationV2HeadsUp = typeof OrchestrationV2HeadsUp.Type;
+
 const OrchestrationV2TurnItemBaseFields = {
   toolNonExecutionKind: Schema.optional(Schema.String),
   toolSurface: Schema.optional(ToolActivitySurface),
@@ -1486,6 +1505,7 @@ export const OrchestrationV2TurnItem = Schema.Union([
     ...OrchestrationV2TurnItemBaseFields,
     type: Schema.Literal("system_notice"),
     message: Schema.String,
+    headsUp: Schema.optional(OrchestrationV2HeadsUp),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
@@ -2264,6 +2284,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     ...OrchestrationV2TurnItemJsonBaseFields,
     type: Schema.Literal("system_notice"),
     message: Schema.String,
+    headsUp: Schema.optional(OrchestrationV2HeadsUp),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
@@ -2968,6 +2989,14 @@ export const OrchestrationV2Command = Schema.Union([
     commandId: CommandId,
     threadId: ThreadId,
     requestId: RuntimeRequestId,
+  }),
+  /** Resolve a heads-up note; `null` puts it back above the composer. */
+  Schema.Struct({
+    type: Schema.Literal("thread.heads-up.resolve"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    turnItemId: TurnItemId,
+    resolution: Schema.NullOr(OrchestrationV2HeadsUpAction),
   }),
   Schema.Struct({
     type: Schema.Literal("checkpoint.rollback"),

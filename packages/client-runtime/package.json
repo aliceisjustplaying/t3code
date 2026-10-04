@@ -35,6 +35,10 @@
       "types": "./src/projectFaviconCache.ts",
       "default": "./src/projectFaviconCache.ts"
     },
+    "./heads-up": {
+      "types": "./src/headsUp.ts",
+      "default": "./src/headsUp.ts"
+    },
     "./user-message": {
       "types": "./src/userMessage.ts",
       "default": "./src/userMessage.ts"
