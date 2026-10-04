@@ -2688,6 +2688,53 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
   );
 
+  it.effect("shows heads-up hook notices without turning ordinary hook output into warnings", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeWakeHarness;
+      const now = yield* DateTime.now;
+      yield* harness.runtime.startTurn(
+        makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now,
+          attemptId: RunAttemptId.make("claude-hook-notices"),
+          text: "Continue",
+          attachments: [],
+        }),
+      );
+      for (const [content, uuid] of [
+        ["Formatted three files", "00000000-0000-4000-8000-000000000701"],
+        [
+          "PostToolUse:Bash says: [ysk:hook] Heads up · Check the migration.",
+          "00000000-0000-4000-8000-000000000702",
+        ],
+      ])
+        yield* Queue.offer(
+          harness.sdkMessages,
+          claudeSdkFrame({
+            type: "system",
+            subtype: "informational",
+            content,
+            session_id: WAKE_NATIVE_SESSION,
+            uuid,
+          }),
+        );
+      yield* Queue.offer(
+        harness.sdkMessages,
+        makeResultFrame({ uuid: "00000000-0000-4000-8000-000000000703", result: "Done" }),
+      );
+      yield* Queue.take(harness.terminalReceipts);
+      const notices = harness.events.flatMap((event) =>
+        event.type === "turn_item.updated" && event.turnItem.type === "system_notice"
+          ? [event.turnItem.message]
+          : [],
+      );
+      assert.deepEqual(notices, [
+        "PostToolUse:Bash says: [ysk:hook] Heads up · Check the migration.",
+      ]);
+    }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+  );
+
   it.effect("surfaces a Claude safety model fallback without failing the turn", () =>
     Effect.gen(function* () {
       const harness = yield* makeWakeHarness;
