@@ -20,7 +20,10 @@ async function loadRequestHook(): Promise<RequestHook> {
   );
   await NodeVM.runInNewContext(`${source}\nt3McpExtension(pi)`, {
     process: { env: {} },
-    pi: { on: (name: string, handler: RequestHook) => handlers.set(name, handler) },
+    pi: {
+      registerCommand() {},
+      on: (name: string, handler: RequestHook) => handlers.set(name, handler),
+    },
   });
   const hook = handlers.get("before_provider_request");
   assert.isDefined(hook);
@@ -56,4 +59,49 @@ describe("Pi upstream output-budget workaround", () => {
       hook({ payload: { max_tokens: 231_969 } }, { model: { provider: "anthropic" } }),
     );
   });
+});
+
+it("reports native extension keepalives and clears the pin once work finishes", async () => {
+  let handler: (() => Promise<void>) | undefined;
+  const statuses: string[] = [];
+  const context = NodeVM.createContext({
+    process: { env: {} },
+    pi: {
+      on() {},
+      registerCommand(
+        _name: string,
+        command: { handler: (_args: string, ctx: unknown) => Promise<void> },
+      ) {
+        handler = () =>
+          command.handler("", {
+            ui: { setStatus: (_key: string, text: string) => statuses.push(text) },
+          });
+      },
+    },
+  });
+  const source = NodeModule.stripTypeScriptTypes(
+    PI_T3_MCP_EXTENSION_SOURCE.replace('import { Type } from "typebox";', "").replace(
+      "export default async function",
+      "async function",
+    ),
+  );
+  await NodeVM.runInContext(source + "\nt3McpExtension(pi)", context);
+  assert.isDefined(handler);
+  await handler!();
+  NodeVM.runInContext(
+    'globalThis[Symbol.for("pi-subagents/keepalive")] = new Set(["wake:1"])',
+    context,
+  );
+  await handler!();
+  NodeVM.runInContext(
+    'globalThis[Symbol.for("pi-subagents/keepalive")].clear(); globalThis[Symbol.for("pi-subagents/runtime")] = { runningSubagents: new Map([["child", {}]]) }',
+    context,
+  );
+  await handler!();
+  NodeVM.runInContext(
+    'globalThis[Symbol.for("pi-subagents/runtime")].runningSubagents.clear()',
+    context,
+  );
+  await handler!();
+  assert.deepEqual(statuses, ["idle", "pending", "pending", "idle"]);
 });

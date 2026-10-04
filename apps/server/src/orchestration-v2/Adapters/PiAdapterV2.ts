@@ -47,6 +47,7 @@ import {
   type OrchestrationV2ProviderTurnTokenUsage,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
+import * as Deferred from "effect/Deferred";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 import * as Duration from "effect/Duration";
@@ -486,6 +487,7 @@ export function makePiAdapterV2(
       // dialog's own resolution updates.
       const sessionEventPermit = yield* Semaphore.make(1);
       let threadState: PiThreadState | null = null;
+      let backgroundProbe: Deferred.Deferred<boolean> | undefined;
       let registrationAttempted = false;
       let lastNativeThreadId: string | null = null;
       // User Stop intentionally tears down this RPC process after aborting.
@@ -1196,6 +1198,15 @@ export function makePiAdapterV2(
         const method = recordString(event, "method");
         const nativeRequestId = recordString(event, "id");
         if (method === undefined) return;
+        if (method === "setStatus" && recordString(event, "statusKey") === "t3:background-work") {
+          if (backgroundProbe !== undefined) {
+            yield* Deferred.succeed(
+              backgroundProbe,
+              recordString(event, "statusText") === "pending",
+            );
+          }
+          return;
+        }
         if (method === "notify") {
           const state = threadState;
           const turn = state?.activeTurn ?? null;
@@ -2298,6 +2309,31 @@ export function makePiAdapterV2(
           return sessionEntity;
         },
         events: Stream.fromQueue(events),
+        hasPendingBackgroundWork: Effect.gen(function* () {
+          const probe = yield* Deferred.make<boolean>();
+          backgroundProbe = probe;
+          yield* request({ type: "prompt", message: "/t3-background-work" }, 2_000);
+          const pending = yield* Deferred.await(probe);
+          const state = yield* request({ type: "get_state" }, 2_000);
+          return (
+            pending ||
+            wake !== null ||
+            recordField(state, "isStreaming") === true ||
+            recordField(state, "isCompacting") === true ||
+            (recordNumber(state, "pendingMessageCount") ?? 0) > 0
+          );
+        }).pipe(
+          Effect.timeoutOrElse({
+            duration: Duration.seconds(5),
+            orElse: () => Effect.succeed(true),
+          }),
+          Effect.catchCause(() => Effect.succeed(true)),
+          Effect.ensuring(
+            Effect.sync(() => {
+              backgroundProbe = undefined;
+            }),
+          ),
+        ),
         getModelContextWindow: (selection) => {
           if (selection.instanceId !== options.instanceId) return undefined;
           const slug =

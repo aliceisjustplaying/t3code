@@ -470,6 +470,26 @@ const expectModelFailure = (errorMessage: string) =>
   }).pipe(Effect.scoped, Effect.provide(layerTest));
 
 describe("PiAdapterV2", () => {
+  it.effect("pins idle sessions while extension work remains and releases when it ends", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime } = yield* openRuntime(fake);
+      for (const pending of [true, false]) {
+        const probe = yield* Effect.forkChild(runtime.hasPendingBackgroundWork!);
+        const request = yield* fake.takeRequest("prompt");
+        assert.equal(request["message"], "/t3-background-work");
+        yield* fake.emit({
+          type: "extension_ui_request",
+          method: "setStatus",
+          statusKey: "t3:background-work",
+          statusText: pending ? "pending" : "idle",
+        });
+        assert.equal(yield* Fiber.join(probe), pending);
+      }
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+
   it.effect("hands a turn Pi starts on its own to the continuation turn it asks for", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
