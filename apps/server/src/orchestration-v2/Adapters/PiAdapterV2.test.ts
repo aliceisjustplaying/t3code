@@ -591,6 +591,151 @@ describe("PiAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect("keeps a taken Pi run in the user turn when Pi rejects that turn's prompt", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const offers =
+        yield* Queue.unbounded<ProviderContinuationRequests.ProviderContinuationRequest>();
+      const { runtime, takeEvent } = yield* openRuntime(
+        fake,
+        "default",
+        THREAD_ID,
+        SESSION_ID,
+        undefined,
+        { offer: (request) => Queue.offer(offers, request).pipe(Effect.asVoid) },
+      );
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      // An extension's run is still streaming when the user turn takes it.
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "message_start", message: { role: "assistant", content: [] } });
+      yield* fake.emit({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Still " },
+      });
+      yield* Queue.take(offers);
+
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({
+        type: "response",
+        command: "prompt",
+        success: false,
+        error: "Agent is already processing.",
+      });
+      // The taken run goes on after the rejection.
+      yield* fake.emit({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "going." },
+      });
+      yield* fake.emit({ type: "message_end", message: { role: "assistant", content: [] } });
+      yield* fake.emit({ type: "agent_settled" });
+
+      const runId = RunId.make(`run:${THREAD_ID}:1`);
+      let replyText: string | null = null;
+      const terminal = yield* takeEvent((event) => {
+        if (
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "assistant_message" &&
+          event.turnItem.runId === runId
+        ) {
+          replyText = event.turnItem.text;
+        }
+        return event.type === "turn.terminal";
+      });
+      // Finalizing at the rejection would have cut the reply at "Still ".
+      assert.equal(replyText, "Still going.");
+      assert.isTrue(
+        terminal.type === "turn.terminal" &&
+          terminal.status === "failed" &&
+          terminal.failure.message === "Agent is already processing.",
+      );
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect(
+    "does not settle a user turn on a taken Pi run's settle before Pi acks the prompt",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const offers =
+          yield* Queue.unbounded<ProviderContinuationRequests.ProviderContinuationRequest>();
+        const { runtime, takeEvent } = yield* openRuntime(
+          fake,
+          "default",
+          THREAD_ID,
+          SESSION_ID,
+          undefined,
+          { offer: (request) => Queue.offer(offers, request).pipe(Effect.asVoid) },
+        );
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        // An extension's run has finished, but its events are still held.
+        yield* fake.emit({ type: "agent_start" });
+        yield* fake.emit({ type: "message_start", message: { role: "assistant", content: [] } });
+        yield* fake.emit({
+          type: "message_update",
+          assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Task finished." },
+        });
+        yield* fake.emit({ type: "message_end", message: { role: "assistant", content: [] } });
+        fake.deferNextState();
+        yield* fake.emit({ type: "agent_settled" });
+        yield* Queue.take(offers);
+
+        yield* startTurn(runtime, providerThread);
+        yield* fake.takeRequest("prompt");
+        // The replayed settle probes Pi, which answers before its prompt
+        // preflight is done and so still reports idle.
+        yield* fake.takeRequest("get_state");
+        yield* fake.resolveDeferredState({
+          isStreaming: false,
+          isCompacting: false,
+          pendingMessageCount: 0,
+        });
+        // Let that answer reach the event pump ahead of the ack, the order that
+      // ended the turn early. The turn must survive the other order too.
+      for (let i = 0; i < 100; i++) yield* Effect.yieldNow;
+        yield* fake.emit({
+          type: "response",
+          command: "prompt",
+          success: true,
+          data: { disposition: "started" },
+        });
+        yield* fake.emit({ type: "agent_start" });
+        yield* fake.emit({ type: "message_start", message: { role: "assistant", content: [] } });
+        yield* fake.emit({
+          type: "message_update",
+          assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Hello back." },
+        });
+        yield* fake.emit({ type: "message_end", message: { role: "assistant", content: [] } });
+        yield* fake.emit({ type: "agent_settled" });
+
+        const runId = RunId.make(`run:${THREAD_ID}:1`);
+        const replies: Array<string> = [];
+        const terminal = yield* takeEvent((event) => {
+          if (
+            event.type === "turn_item.updated" &&
+            event.turnItem.type === "assistant_message" &&
+            event.turnItem.runId === runId &&
+            event.turnItem.streaming === false
+          ) {
+            replies.push(event.turnItem.text);
+          }
+          return event.type === "turn.terminal";
+        });
+        assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+        // Settling on the stale idle answer would end the turn before its reply.
+        assert.include(replies, "Hello back.");
+        assert.equal(yield* Queue.size(offers), 0);
+      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("injects the T3 MCP extension and bearer when a session exists", () =>
     Effect.gen(function* () {
       McpProviderSession.setMcpProviderSession({
