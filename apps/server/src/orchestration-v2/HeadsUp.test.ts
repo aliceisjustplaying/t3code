@@ -5,6 +5,7 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderThreadId,
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
@@ -14,6 +15,7 @@ import * as Layer from "effect/Layer";
 
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
+import * as EffectOutbox from "./EffectOutbox.ts";
 import { parseHeadsUpNotice } from "./HeadsUpNotice.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -60,6 +62,7 @@ const database = SqlitePersistenceMemory;
 const orchestratorLayer = Layer.mergeAll(
   database,
   ProjectionStore.layer.pipe(Layer.provide(database)),
+  EffectOutbox.layer.pipe(Layer.provide(database)),
   makeOrchestratorV2ReplayLayerWithRegistry(
     { name: "heads-up" },
     ProviderAdapterRegistry.makeLayer([adapter]),
@@ -71,8 +74,10 @@ it.effect("resolving a heads-up persists, survives a small window, and can be un
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
     const threadId = ThreadId.make("thread:heads-up");
     const itemId = TurnItemId.make("item:heads-up");
+    const providerThreadId = ProviderThreadId.make("provider-thread:heads-up");
     const now = yield* DateTime.now;
     yield* orchestrator.dispatch({
       type: "thread.create",
@@ -98,7 +103,7 @@ it.effect("resolving a heads-up persists, survives a small window, and can be un
         threadId,
         runId: null,
         nodeId: null,
-        providerThreadId: null,
+        providerThreadId,
         providerTurnId: null,
         nativeItemRef: null,
         parentItemId: null,
@@ -161,6 +166,13 @@ it.effect("resolving a heads-up persists, survives a small window, and can be un
     });
     assert.equal((yield* headsUpOf)?.resolution, "knew");
     assert.notInclude(yield* windowIds, itemId);
+    const answers = (commandId: string) =>
+      Effect.map(outbox.listByCommandId(CommandId.make(commandId)), (effects) =>
+        effects.map((effect) => effect.request),
+      );
+    assert.deepEqual(yield* answers("resolve-knew"), [
+      { type: "provider-heads-up.answer", providerThreadId, noteId: "n-1", resolution: "knew" },
+    ]);
 
     yield* orchestrator.dispatch({
       type: "thread.heads-up.resolve",
@@ -169,6 +181,7 @@ it.effect("resolving a heads-up persists, survives a small window, and can be un
       turnItemId: itemId,
       resolution: null,
     });
+    assert.deepEqual(yield* answers("resolve-restore"), []);
     const restored = yield* headsUpOf;
     assert.deepEqual(restored, {
       noteId: "n-1",

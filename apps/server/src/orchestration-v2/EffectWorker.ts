@@ -367,6 +367,35 @@ export const layerExecutor: Layer.Layer<
                     }),
                 ),
               );
+          case "provider-heads-up.answer": {
+            const request = effect.request;
+            // Only a live session can still hold the note; a closed one forgot it.
+            return Effect.gen(function* () {
+              const { providerThreads } = yield* threads.getThreadRecords(effect.threadId, [
+                "providerThreads",
+              ]);
+              const providerThread = providerThreads.find(
+                (candidate) => candidate.id === request.providerThreadId,
+              );
+              if (providerThread?.providerSessionId == null) return;
+              const session = yield* providerSessions.get(providerThread.providerSessionId);
+              if (Option.isNone(session) || session.value.answerHeadsUp === undefined) return;
+              yield* session.value.answerHeadsUp({
+                providerThread,
+                noteId: request.noteId,
+                resolution: request.resolution,
+              });
+            }).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationEffectExecutionError({
+                    effectId: effect.id,
+                    effectType: request.type,
+                    cause,
+                  }),
+              ),
+            );
+          }
           case "provider-thread.rollback":
             return checkpointRollback
               .execute({

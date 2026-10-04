@@ -3,6 +3,7 @@ import {
   CheckpointScopeId,
   CommandId,
   MessageId,
+  OrchestrationV2HeadsUpAction,
   ProviderSessionId,
   RunAttemptId,
   ProviderApprovalDecision,
@@ -80,6 +81,13 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
     decision: Schema.optional(ProviderApprovalDecision),
     answers: Schema.optional(ProviderUserInputAnswers),
   }),
+  /** Tells the provider thread that raised a heads-up note how the user answered it. */
+  Schema.Struct({
+    type: Schema.Literal("provider-heads-up.answer"),
+    providerThreadId: ProviderThreadId,
+    noteId: Schema.String,
+    resolution: OrchestrationV2HeadsUpAction,
+  }),
   Schema.Struct({
     type: Schema.Literal("provider-thread.rollback"),
     restoreFiles: Schema.optional(Schema.Boolean),
@@ -131,6 +139,7 @@ export const PROCESS_BOUND_EFFECT_TYPES = [
   "provider-turn.steer",
   "provider-turn.restart",
   "runtime-request.respond",
+  "provider-heads-up.answer",
 ] as const satisfies ReadonlyArray<OrchestrationEffectRequestV2["type"]>;
 
 export const OrchestrationEffectStatusV2 = Schema.Literals([
