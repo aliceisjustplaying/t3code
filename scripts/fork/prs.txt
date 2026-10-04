@@ -1,6 +1,8 @@
 # Upstream PRs merged into `fork-stack`, in order. One number per line; text after it is a note.
 # Skipped: #13839 and #12506 conflict with upstream main.
 # 15529 and 14941 conflict with 15079 in PiProvider.test.ts only; rr-cache/ holds the resolutions.
+# fixups/15529.patch: its test uses JSON.parse/stringify inside Effect.gen, which fails the
+# server typecheck (effect preferSchemaOverJson); it switches to 15079's Schema helpers.
 15368 Pi notify becomes a notice (HeadsUp relies on it)
 15444 Pi turns start while an extension run is streaming
 14435 declined Pi confirmations stay cancelled
