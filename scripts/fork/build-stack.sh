@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Rebuilds the `stack` branch: upstream/main, then each PR in prs.txt, then `ours`.
+# Rebuilds the `fork-stack` branch: upstream/main, then each PR in prs.txt, then `ours`.
 # Reads prs.txt from `ours`. Needs a clean worktree. Conflict resolutions recorded in
 # rr-cache/ (copied from .git/rr-cache after resolving) are replayed by rerere.
 set -euo pipefail
@@ -26,7 +26,7 @@ main() {
   git archive ours scripts/fork/rr-cache | tar -x --strip-components=3 -C "$rr"
   local prs
   prs=$(git show ours:scripts/fork/prs.txt | sed -e 's/#.*//' | awk 'NF { print $1 }')
-  git checkout -B stack upstream/main
+  git checkout -B fork-stack upstream/main
   for pr in $prs; do
     git fetch upstream "pull/$pr/head"
     merge FETCH_HEAD "Merge upstream PR #$pr"
