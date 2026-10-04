@@ -2706,8 +2706,6 @@ export function ConnectionsSettings() {
         : visibleDesktopNetworkAdvertisedEndpoints,
     [tailscaleHttpsEndpoint, visibleDesktopNetworkAdvertisedEndpoints],
   );
-  const isLocalBackendRemotelyReachable =
-    isLocalBackendNetworkAccessible || tailscaleHttpsEndpoint?.status === "available";
   const defaultDesktopNetworkAdvertisedEndpoint = useMemo(
     () =>
       selectPairingEndpoint(visibleDesktopNetworkAdvertisedEndpoints, defaultAdvertisedEndpointKey),
@@ -3564,7 +3562,7 @@ export function ConnectionsSettings() {
             ) : null}
           </SettingsSection>
 
-          {isLocalBackendRemotelyReachable ? (
+          {canManageLocalBackend ? (
             <FoldedSettingsSection
               id="authorized-clients"
               title="Authorized clients"
