@@ -173,6 +173,13 @@ export type TimelineEntry = (
   readonly attempt?: TimelineAttempt;
 };
 
+const HEADS_UP_LABEL = {
+  knew: "knew this",
+  dismiss: "dismissed",
+  learn: "explained",
+  send: "sent to agent",
+} as const;
+
 export function workLogEntryIsToolLike(entry: WorkLogEntry): boolean {
   return (
     entry.tone === "tool" ||
@@ -507,11 +514,18 @@ function projectedWorkEntry(row: OrchestrationV2ProjectedTurnItem): WorkLogEntry
         toolData: item,
       };
     case "system_notice":
-      return {
-        ...common,
-        label: item.message,
-        sourceActivityKind: "runtime.warning",
-      };
+      // Heads-up notes are answered in the composer band; here they are a calm record.
+      return item.headsUp === undefined
+        ? { ...common, label: item.message, sourceActivityKind: "runtime.warning" }
+        : {
+            ...common,
+            label: `\u2726 ${item.headsUp.tag} \u00b7 ${item.headsUp.line}${
+              item.headsUp.resolution === undefined
+                ? ""
+                : ` (${HEADS_UP_LABEL[item.headsUp.resolution]})`
+            }`,
+            sourceActivityKind: "runtime.notice",
+          };
     case "error": {
       const presentation = providerErrorPresentation(item);
       return {
