@@ -2782,6 +2782,13 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     )
                     AND request.type = 'run_interrupt_request'
                   UNION
+                  SELECT job.payload_json, job.ordinal, job.turn_item_id
+                  FROM orchestration_v2_projection_turn_items AS job
+                  WHERE job.thread_id = ${threadId}
+                    AND ${window.anchorItemId ?? null} IS NULL
+                    AND job.type = 'system_notice'
+                    AND json_extract(job.payload_json, '$.job.id') IS NOT NULL
+                  UNION
                   -- Unanswered heads-up notes stay loaded however old, so the band
                   -- above the composer shows each one until the user acts on it.
                   SELECT note.payload_json, note.ordinal, note.turn_item_id
@@ -3575,7 +3582,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     SELECT 1 FROM orchestration_v2_projection_runs AS run
                     WHERE run.run_id = item.run_id AND run.status = 'rolled_back'
                   )
-                  AND type IN ('command_execution', 'dynamic_tool', 'subagent')
+                  AND (type IN ('command_execution', 'dynamic_tool', 'subagent') OR json_extract(item.payload_json, '$.job.id') IS NOT NULL)
                   AND status IN ('pending', 'running', 'waiting')
                 UNION
                 SELECT thread_id FROM orchestration_v2_effect_outbox
@@ -4093,6 +4100,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                       AND status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
                   )
                   OR item.type IN ('command_execution', 'dynamic_tool', 'subagent')
+                  OR json_extract(item.payload_json, '$.job.id') IS NOT NULL
                   OR (
                     item.run_id IS NULL
                     AND item.node_id IN (

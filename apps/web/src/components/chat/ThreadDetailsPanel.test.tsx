@@ -21,6 +21,7 @@ vi.mock("../ProjectScriptsControl", () => ({
     return null;
   },
 }));
+vi.mock("./ThreadJobsPanel", () => ({ ThreadJobsPanel: () => null }));
 vi.mock("./ThreadAutomationsPanel", () => ({
   ThreadAutomationsPanel: () => null,
 }));
@@ -56,6 +57,7 @@ describe("ThreadDetailsPanel", () => {
       anchor: { current: null },
       handle: PopoverCreateHandle(),
       onPresentationChange: vi.fn(),
+      onSelectJob: vi.fn(),
       environmentId,
       threadId: "thread:thread-details" as ThreadId,
       activeProjectName: undefined,

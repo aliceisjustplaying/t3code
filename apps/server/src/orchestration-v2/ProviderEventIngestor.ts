@@ -389,13 +389,13 @@ export const layer: Layer.Layer<
       },
     );
 
-    const headsUpParentThreadId = Effect.fnUntraced(function* (input: ProviderEventIngestInput) {
+    const contextParentThreadId = Effect.fnUntraced(function* (input: ProviderEventIngestInput) {
       if (input.event.type !== "turn_item.updated") return undefined;
       const item = withHeadsUp(stripUnservedToolOutputImageBytes(input.event.turnItem));
       if (
         item.type !== "system_notice" ||
-        item.headsUp === undefined ||
-        item.headsUp.sourceThreadId !== undefined
+        (item.headsUp === undefined && item.job === undefined) ||
+        (item.headsUp?.sourceThreadId ?? item.job?.sourceThreadId) !== undefined
       )
         return undefined;
       const child = yield* projections.getThread(item.threadId);
@@ -489,11 +489,11 @@ export const layer: Layer.Layer<
                 nodeId: item.nodeId,
               }),
             ];
-            const parentThreadId = yield* headsUpParentThreadId(input);
+            const parentThreadId = yield* contextParentThreadId(input);
             if (
               parentThreadId === undefined ||
               item.type !== "system_notice" ||
-              item.headsUp === undefined
+              (item.headsUp === undefined && item.job === undefined)
             )
               return events;
             const child = yield* projections.getThread(item.threadId);
@@ -509,11 +509,16 @@ export const layer: Layer.Layer<
             // Pi can re-notify a note with a new item ID. Keep one parent copy,
             // including its answer, across repeats and session reconnects.
             const id = TurnItemId.make(
-              `heads-up:${encodeURIComponent(item.threadId)}:${encodeURIComponent(item.headsUp.noteId)}`,
+              item.job
+                ? `job:${item.id}`
+                : `heads-up:${encodeURIComponent(item.threadId)}:${encodeURIComponent(item.headsUp!.noteId)}`,
             );
-            if (yield* projections.getTurnItem({ threadId: parentThreadId, itemId: id }))
-              return events;
-            const line = `${task.title ?? child.title}: ${item.headsUp.line}`;
+            const previous = yield* projections.getTurnItem({
+              threadId: parentThreadId,
+              itemId: id,
+            });
+            if (previous && !item.job) return events;
+            const line = `${task.title ?? child.title}: ${item.job?.name ?? item.headsUp!.line}`;
             const { runId: _childRunId, nodeId: _childNodeId, ...parentInput } = input;
             events.push(
               yield* makeDomainEvent(parentInput, {
@@ -528,9 +533,19 @@ export const layer: Layer.Layer<
                   runId: task.runId,
                   nodeId: task.id,
                   parentItemId: null,
-                  ordinal: yield* projections.getNextTurnItemOrdinal(parentThreadId),
+                  ordinal:
+                    previous?.ordinal ??
+                    (yield* projections.getNextTurnItemOrdinal(parentThreadId)),
                   title: line,
-                  headsUp: { ...item.headsUp, line, sourceThreadId: item.threadId },
+                  ...(item.job
+                    ? {
+                        job: {
+                          ...item.job,
+                          sourceThreadId: item.threadId,
+                          sourceTitle: task.title ?? child.title,
+                        },
+                      }
+                    : { headsUp: { ...item.headsUp!, line, sourceThreadId: item.threadId } }),
                 },
               }),
             );
@@ -704,7 +719,7 @@ export const layer: Layer.Layer<
       normalize,
       ingestNormalized: (input) =>
         Effect.gen(function* () {
-          const parentThreadId = yield* headsUpParentThreadId(input).pipe(
+          const parentThreadId = yield* contextParentThreadId(input).pipe(
             Effect.mapError(
               (cause) =>
                 new ProviderEventNormalizeError({

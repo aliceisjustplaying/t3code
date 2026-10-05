@@ -604,6 +604,11 @@ export interface ProviderAdapterV2SessionRuntime {
    * Passes the user's answer to a heads-up note back to whatever raised it in
    * the provider. Providers without a note source omit it.
    */
+  readonly stopJob?: (input: {
+    readonly providerThread: OrchestrationV2ProviderThread;
+    readonly scope: string;
+    readonly jobId: string;
+  }) => Effect.Effect<void, ProviderAdapterV2Error>;
   readonly answerHeadsUp?: (input: {
     readonly providerThread: OrchestrationV2ProviderThread;
     readonly noteId: string;
