@@ -337,13 +337,17 @@ function isLocalProjectedRow(
  * later history page that introduces the matching result still has the request
  * available for live attempt/run reducers. Unanswered heads-ups are composer
  * controls and must also survive outside the transcript window, including Undo.
+ * Jobs (including finished jobs and parent copies of child jobs) back the jobs
+ * panel independently of transcript paging. Their schema-bounded output is
+ * charged to the same control reserve; excess control state is reported rather
+ * than silently dropping a live Stop target.
  */
 function isRetainedControlItem(item: OrchestrationV2TurnItem): boolean {
   return (
     item.type === "run_interrupt_request" ||
     (item.type === "system_notice" &&
-      item.headsUp !== undefined &&
-      item.headsUp.resolution === undefined)
+      (item.job !== undefined ||
+        (item.headsUp !== undefined && item.headsUp.resolution === undefined)))
   );
 }
 
@@ -445,7 +449,7 @@ export function computeLatestLocalTurnOrdinal(
 
 /**
  * Encoded timeline contribution for a bounded snapshot: visible rows plus the
- * duplicated local turnItems and any retained interrupt-request dependencies.
+ * duplicated local turnItems and any retained controls.
  */
 export function boundedTimelineEncodedBytes(input: {
   readonly visibleTurnItems: ReadonlyArray<OrchestrationV2ProjectedTurnItem>;
