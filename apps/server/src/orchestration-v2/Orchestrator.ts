@@ -7330,7 +7330,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const answer: PendingOrchestrationEffectV2 = {
         id: `effect:${command.commandId}:provider-heads-up.answer`,
         commandId: command.commandId,
-        threadId: command.threadId,
+        threadId: headsUp.sourceThreadId ?? command.threadId,
         request: {
           type: "provider-heads-up.answer",
           providerThreadId,

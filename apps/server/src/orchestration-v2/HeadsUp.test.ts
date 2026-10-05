@@ -201,5 +201,38 @@ it.effect("resolving a heads-up persists, survives a small window, and can be un
       }),
     );
     assert.equal(missing._tag, "Failure");
+
+    // A forwarded note is answered in the parent's UI but its extension lives
+    // in the child's provider session, including when Undo restores the note.
+    const sourceThreadId = ThreadId.make("thread:heads-up-child");
+    const sourceItem = (yield* projections.getThreadProjection(threadId)).turnItems.find(
+      (candidate) => candidate.id === itemId,
+    );
+    assert(sourceItem?.type === "system_notice" && sourceItem.headsUp !== undefined);
+    yield* projections.apply({
+      id: EventId.make("seed-forwarded-heads-up"),
+      type: "turn-item.updated",
+      threadId,
+      occurredAt: now,
+      payload: { ...sourceItem, headsUp: { ...sourceItem.headsUp, sourceThreadId } },
+    });
+    for (const resolution of ["knew", null] as const) {
+      const commandId = CommandId.make(`answer-forwarded-${resolution}`);
+      yield* orchestrator.dispatch({
+        type: "thread.heads-up.resolve",
+        commandId,
+        threadId,
+        turnItemId: itemId,
+        resolution,
+      });
+      const effects = yield* outbox.listByCommandId(commandId);
+      assert.equal(effects[0]?.threadId, sourceThreadId);
+      assert.deepEqual(effects[0]?.request, {
+        type: "provider-heads-up.answer",
+        providerThreadId,
+        noteId: "n-1",
+        resolution,
+      });
+    }
   }).pipe(Effect.provide(orchestratorLayer)),
 );

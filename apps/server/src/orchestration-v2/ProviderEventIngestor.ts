@@ -18,6 +18,7 @@ import {
   RunAttemptId,
   RunId,
   ThreadId,
+  TurnItemId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -388,6 +389,21 @@ export const layer: Layer.Layer<
       },
     );
 
+    const headsUpParentThreadId = Effect.fnUntraced(function* (input: ProviderEventIngestInput) {
+      if (input.event.type !== "turn_item.updated") return undefined;
+      const item = withHeadsUp(stripUnservedToolOutputImageBytes(input.event.turnItem));
+      if (
+        item.type !== "system_notice" ||
+        item.headsUp === undefined ||
+        item.headsUp.sourceThreadId !== undefined
+      )
+        return undefined;
+      const child = yield* projections.getThread(item.threadId);
+      return child.lineage.relationshipToParent === "subagent" && child.forkedFrom?.type === "node"
+        ? (child.lineage.parentThreadId ?? undefined)
+        : undefined;
+    });
+
     const normalize: ProviderEventIngestorV2Shape["normalize"] = (input) =>
       Effect.gen(function* () {
         switch (input.event.type) {
@@ -462,16 +478,64 @@ export const layer: Layer.Layer<
                 nodeId: input.event.message.nodeId,
               }),
             ];
-          case "turn_item.updated":
-            return [
+          case "turn_item.updated": {
+            const item = withHeadsUp(input.event.turnItem);
+            const events = [
               yield* makeDomainEvent(input, {
                 type: "turn-item.updated",
-                threadId: input.event.turnItem.threadId,
-                payload: withHeadsUp(stripUnservedToolOutputImageBytes(input.event.turnItem)),
-                runId: input.event.turnItem.runId,
-                nodeId: input.event.turnItem.nodeId,
+                threadId: item.threadId,
+                payload: item,
+                runId: item.runId,
+                nodeId: item.nodeId,
               }),
             ];
+            const parentThreadId = yield* headsUpParentThreadId(input);
+            if (
+              parentThreadId === undefined ||
+              item.type !== "system_notice" ||
+              item.headsUp === undefined
+            )
+              return events;
+            const child = yield* projections.getThread(item.threadId);
+            const parent = yield* projections.getThreadRecords(parentThreadId, ["subagents"]);
+            const task = parent.subagents.find(
+              (candidate) =>
+                child.forkedFrom?.type === "node" &&
+                candidate.id === child.forkedFrom.nodeId &&
+                candidate.origin === "app_owned" &&
+                candidate.childThreadId === item.threadId,
+            );
+            if (task === undefined || parent.thread.deletedAt !== null) return events;
+            // Pi can re-notify a note with a new item ID. Keep one parent copy,
+            // including its answer, across repeats and session reconnects.
+            const id = TurnItemId.make(
+              `heads-up:${encodeURIComponent(item.threadId)}:${encodeURIComponent(item.headsUp.noteId)}`,
+            );
+            if (yield* projections.getTurnItem({ threadId: parentThreadId, itemId: id }))
+              return events;
+            const line = `${task.title ?? child.title}: ${item.headsUp.line}`;
+            const { runId: _childRunId, nodeId: _childNodeId, ...parentInput } = input;
+            events.push(
+              yield* makeDomainEvent(parentInput, {
+                type: "turn-item.updated",
+                threadId: parentThreadId,
+                runId: task.runId,
+                nodeId: task.id,
+                payload: {
+                  ...item,
+                  id,
+                  threadId: parentThreadId,
+                  runId: task.runId,
+                  nodeId: task.id,
+                  parentItemId: null,
+                  ordinal: yield* projections.getNextTurnItemOrdinal(parentThreadId),
+                  title: line,
+                  headsUp: { ...item.headsUp, line, sourceThreadId: item.threadId },
+                },
+              }),
+            );
+            return events;
+          }
           case "runtime_request.updated":
             return [
               yield* makeDomainEvent(input, {
@@ -548,96 +612,115 @@ export const layer: Layer.Layer<
         ),
       );
 
+    const ingestNormalized: ProviderEventIngestorV2Shape["ingestNormalized"] = (input) =>
+      Effect.gen(function* () {
+        const events = yield* normalize(input);
+        if (events.length === 0) {
+          return [];
+        }
+        const mapWriteError = (cause: unknown) =>
+          new ProviderEventPublishError({
+            providerSessionId: input.providerSessionId,
+            eventCount: events.length,
+            cause,
+          });
+        if (input.writeIfProviderThreadOwner !== undefined) {
+          const ownerResult = yield* eventSink
+            .writeIfProviderThreadOwner({
+              guardPendingUserInputCancellations: true,
+              ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
+              ...input.writeIfProviderThreadOwner,
+              events,
+            })
+            .pipe(Effect.mapError(mapWriteError));
+          return ownerResult.storedEvents;
+        }
+        if (input.writeIfRunCurrent === undefined) {
+          return yield* eventSink
+            .write({
+              guardPendingUserInputCancellations: true,
+              ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
+              events,
+            })
+            .pipe(Effect.mapError(mapWriteError));
+        }
+        const result = yield* eventSink
+          .writeIfRunCurrent({
+            guardPendingUserInputCancellations: true,
+            ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
+            threadId: input.threadId,
+            ...input.writeIfRunCurrent,
+            events,
+          })
+          .pipe(Effect.mapError(mapWriteError));
+        return result.storedEvents;
+      }).pipe(
+        Effect.flatMap((storedEvents) =>
+          storedEvents.length === 0 || input.event.type !== "subagent.updated"
+            ? Effect.succeed(storedEvents)
+            : syncSubagentThreadModel(input, input.event.subagent).pipe(
+                Effect.map((synced) => [...storedEvents, ...synced]),
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderEventPublishError({
+                      providerSessionId: input.providerSessionId,
+                      eventCount: 1,
+                      cause,
+                    }),
+                ),
+              ),
+        ),
+        Effect.tap((storedEvents) =>
+          Effect.gen(function* () {
+            if (storedEvents.length === 0 || input.event.type !== "provider_turn.updated") return;
+            const providerTurn = input.event.providerTurn;
+            if (
+              providerTurn.status !== "completed" &&
+              providerTurn.status !== "failed" &&
+              providerTurn.status !== "interrupted" &&
+              providerTurn.status !== "cancelled"
+            )
+              return;
+            const key = `${input.providerInstanceId}:${providerTurn.id}`;
+            if (completedTurnAnalytics.has(key)) return;
+            completedTurnAnalytics.add(key);
+            if (completedTurnAnalytics.size > 4096) {
+              const oldest = completedTurnAnalytics.values().next().value;
+              if (oldest !== undefined) completedTurnAnalytics.delete(oldest);
+            }
+            yield* analytics.record(
+              providerTurnAnalyticsProperties({
+                driver: input.event.driver,
+                providerTurn,
+                ...(input.analyticsContext === undefined
+                  ? {}
+                  : { context: input.analyticsContext }),
+              }),
+            );
+          }),
+        ),
+      );
     return ProviderEventIngestorV2.of({
       normalize,
       ingestNormalized: (input) =>
         Effect.gen(function* () {
-          const events = yield* normalize(input);
-          if (events.length === 0) {
-            return [];
-          }
-          const mapWriteError = (cause: unknown) =>
-            new ProviderEventPublishError({
-              providerSessionId: input.providerSessionId,
-              eventCount: events.length,
-              cause,
-            });
-          if (input.writeIfProviderThreadOwner !== undefined) {
-            const ownerResult = yield* eventSink
-              .writeIfProviderThreadOwner({
-                guardPendingUserInputCancellations: true,
-                ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
-                ...input.writeIfProviderThreadOwner,
-                events,
-              })
-              .pipe(Effect.mapError(mapWriteError));
-            return ownerResult.storedEvents;
-          }
-          if (input.writeIfRunCurrent === undefined) {
-            return yield* eventSink
-              .write({
-                guardPendingUserInputCancellations: true,
-                ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
-                events,
-              })
-              .pipe(Effect.mapError(mapWriteError));
-          }
-          const result = yield* eventSink
-            .writeIfRunCurrent({
-              guardPendingUserInputCancellations: true,
-              ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
-              threadId: input.threadId,
-              ...input.writeIfRunCurrent,
-              events,
-            })
-            .pipe(Effect.mapError(mapWriteError));
-          return result.storedEvents;
-        }).pipe(
-          Effect.flatMap((storedEvents) =>
-            storedEvents.length === 0 || input.event.type !== "subagent.updated"
-              ? Effect.succeed(storedEvents)
-              : syncSubagentThreadModel(input, input.event.subagent).pipe(
-                  Effect.map((synced) => [...storedEvents, ...synced]),
-                  Effect.mapError(
-                    (cause) =>
-                      new ProviderEventPublishError({
-                        providerSessionId: input.providerSessionId,
-                        eventCount: 1,
-                        cause,
-                      }),
-                  ),
-                ),
-          ),
-          Effect.tap((storedEvents) =>
-            Effect.gen(function* () {
-              if (storedEvents.length === 0 || input.event.type !== "provider_turn.updated") return;
-              const providerTurn = input.event.providerTurn;
-              if (
-                providerTurn.status !== "completed" &&
-                providerTurn.status !== "failed" &&
-                providerTurn.status !== "interrupted" &&
-                providerTurn.status !== "cancelled"
-              )
-                return;
-              const key = `${input.providerInstanceId}:${providerTurn.id}`;
-              if (completedTurnAnalytics.has(key)) return;
-              completedTurnAnalytics.add(key);
-              if (completedTurnAnalytics.size > 4096) {
-                const oldest = completedTurnAnalytics.values().next().value;
-                if (oldest !== undefined) completedTurnAnalytics.delete(oldest);
-              }
-              yield* analytics.record(
-                providerTurnAnalyticsProperties({
-                  driver: input.event.driver,
-                  providerTurn,
-                  ...(input.analyticsContext === undefined
-                    ? {}
-                    : { context: input.analyticsContext }),
+          const parentThreadId = yield* headsUpParentThreadId(input).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderEventNormalizeError({
+                  providerSessionId: input.providerSessionId,
+                  threadId: input.threadId,
+                  providerEvent: input.event,
+                  cause,
                 }),
-              );
-            }),
-          ),
-        ),
+            ),
+          );
+          // Serialize deduplication with parent answers; both copies still commit
+          // atomically through the child's existing ownership gate.
+          return yield* parentThreadId === undefined
+            ? ingestNormalized(input)
+            : threadCommands.withLock(parentThreadId, ingestNormalized(input));
+        }),
     });
   }),
 );

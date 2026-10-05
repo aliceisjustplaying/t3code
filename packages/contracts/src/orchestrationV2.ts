@@ -1320,6 +1320,8 @@ export type OrchestrationV2HeadsUpAction = typeof OrchestrationV2HeadsUpAction.T
  * Unresolved notes are pinned above the composer; `resolution` takes one out.
  */
 export const OrchestrationV2HeadsUp = Schema.Struct({
+  /** Original child thread for forwarded notes; feedback belongs to its provider session. */
+  sourceThreadId: Schema.optional(ThreadId),
   noteId: Schema.String,
   tag: Schema.String,
   line: Schema.String,
