@@ -335,9 +335,19 @@ function isLocalProjectedRow(
  * `run_interrupt_request` in `turnItems`. Keep every small request item from the
  * full projection even when it sits outside the recent visible window, so a
  * later history page that introduces the matching result still has the request
- * available for live attempt/run reducers.
+ * available for live attempt/run reducers. Unanswered heads-ups are composer
+ * controls and must also survive outside the transcript window, including Undo.
  */
-function retainedInterruptRequestTurnItems(
+function isRetainedControlItem(item: OrchestrationV2TurnItem): boolean {
+  return (
+    item.type === "run_interrupt_request" ||
+    (item.type === "system_notice" &&
+      item.headsUp !== undefined &&
+      item.headsUp.resolution === undefined)
+  );
+}
+
+function retainedControlTurnItems(
   projection: OrchestrationV2ThreadProjection,
   visible: ReadonlyArray<OrchestrationV2ProjectedTurnItem>,
 ): OrchestrationV2TurnItem[] {
@@ -350,7 +360,7 @@ function retainedInterruptRequestTurnItems(
 
   const retained: OrchestrationV2TurnItem[] = [];
   for (const item of projection.turnItems) {
-    if (item.type !== "run_interrupt_request") {
+    if (!isRetainedControlItem(item)) {
       continue;
     }
     // Already covered by local turnItems for the visible window.
@@ -471,14 +481,13 @@ export function buildBoundedThreadProjection(input: {
   };
   const latestLocalTurnOrdinal = computeLatestLocalTurnOrdinal(input.projection.turnItems);
 
-  // Reserve bytes for small interrupt-request dependencies that may sit outside
-  // the recent window but are required for visibility of results inside it.
+  // Reserve bytes for controls retained outside the recent transcript window.
   const dependencyReserve = (() => {
-    // Upper bound: all request items in the full projection. Window selection
+    // Upper bound: all retained controls in the full projection. Window selection
     // uses this reserve so the final contribution stays under the cap.
     let reserve = 0;
     for (const item of controlProjection.turnItems) {
-      if (item.type === "run_interrupt_request") {
+      if (isRetainedControlItem(item)) {
         reserve += bytesOfJson(item);
       }
     }
@@ -509,10 +518,7 @@ export function buildBoundedThreadProjection(input: {
   });
   const visibleTurnItems = renumberPositions(window.items);
   const windowTurnItems = localTurnItemsForVisibleWindow(controlProjection, visibleTurnItems);
-  const dependencyTurnItems = retainedInterruptRequestTurnItems(
-    controlProjection,
-    visibleTurnItems,
-  );
+  const dependencyTurnItems = retainedControlTurnItems(controlProjection, visibleTurnItems);
   const turnItemById = new Map<string, OrchestrationV2TurnItem>();
   for (const item of windowTurnItems) {
     turnItemById.set(String(item.id), item);

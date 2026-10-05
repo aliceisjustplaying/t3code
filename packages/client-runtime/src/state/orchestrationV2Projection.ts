@@ -249,9 +249,16 @@ export function applyOrchestrationV2ProjectionEvent(
     case "plan.updated":
       return { ...base, plans: upsertEntity(base.plans, event.payload) };
     case "turn-item.updated": {
+      // Undo restores composer state even when the note predates this history page.
+      // The visible-row guard below still keeps the transcript window bounded.
       if (
         partialTimeline &&
         !projection.turnItems.some((candidate) => candidate.id === event.payload.id) &&
+        !(
+          event.payload.type === "system_notice" &&
+          event.payload.headsUp !== undefined &&
+          event.payload.headsUp.resolution === undefined
+        ) &&
         shouldDropMissingPartialTurnItem(projection, event.payload, latestLocalTurnOrdinal)
       ) {
         return projection;

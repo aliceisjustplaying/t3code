@@ -39,7 +39,11 @@ const run = {
   contextHandoffId: null,
 } satisfies OrchestrationV2Run;
 
-function commandItem(id: string, output = "done", ordinal = 1): OrchestrationV2TurnItem {
+function commandItem(
+  id: string,
+  output = "done",
+  ordinal = 1,
+): Extract<OrchestrationV2TurnItem, { type: "command_execution" }> {
   return {
     id: TurnItemId.make(id),
     threadId,
@@ -349,3 +353,48 @@ it("does not scan every row against every run for a streaming item update", () =
   expect(next?.visibleTurnItems[0]).toBe(projection.visibleTurnItems[0]);
   expect(runReads).toBeLessThanOrEqual(100);
 });
+
+it.each([undefined, ThreadId.make("child-thread")])(
+  "restores an old heads-up absent from a partial window (source %s)",
+  (sourceThreadId) => {
+    const recent = commandItem("recent", "done", 100);
+    const projection = {
+      ...emptyProjection,
+      turnItems: [recent],
+      visibleTurnItems: [
+        {
+          position: 0,
+          visibility: "local" as const,
+          sourceThreadId: threadId,
+          sourceItemId: recent.id,
+          item: recent,
+        },
+      ],
+    };
+    const restored: OrchestrationV2TurnItem = {
+      ...commandItem("old-note", "", 1),
+      type: "system_notice",
+      message: "Heads up",
+      headsUp: {
+        noteId: "old-note",
+        tag: "Heads up",
+        line: "Keep this note",
+        ...(sourceThreadId ? { sourceThreadId } : {}),
+      },
+    };
+    const next = applyOrchestrationV2ProjectionEvent(
+      projection,
+      {
+        id: "undo-note",
+        type: "turn-item.updated",
+        threadId,
+        occurredAt: now,
+        payload: restored,
+      } as OrchestrationV2DomainEvent,
+      { partialTimeline: true, latestLocalTurnOrdinal: 100 },
+    );
+    expect(next?.turnItems).toContainEqual(restored);
+    // Restoring a composer control must not expand the paged transcript.
+    expect(next?.visibleTurnItems).toEqual(projection.visibleTurnItems);
+  },
+);
