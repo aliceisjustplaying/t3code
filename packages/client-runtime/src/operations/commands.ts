@@ -877,6 +877,17 @@ export const dismissThreadUserInput = Effect.fn("EnvironmentCommands.dismissThre
   },
 );
 
+export const stopThreadJob = Effect.fn("EnvironmentCommands.stopThreadJob")(function* (
+  input: ThreadCommandInput & { readonly turnItemId: TurnItemId },
+) {
+  return yield* dispatch({
+    type: "thread.job.stop",
+    commandId: yield* allocateCommandId(input),
+    threadId: input.threadId,
+    turnItemId: input.turnItemId,
+  });
+});
+
 export const resolveThreadHeadsUp = Effect.fn("EnvironmentCommands.resolveThreadHeadsUp")(
   function* (input: ResolveThreadHeadsUpInput) {
     return yield* dispatch({

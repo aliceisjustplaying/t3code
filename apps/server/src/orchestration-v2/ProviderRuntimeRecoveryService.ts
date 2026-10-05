@@ -449,7 +449,10 @@ export const make = Effect.gen(function* () {
         if (item.runId !== null && recoveredNonterminalRunIds.has(item.runId)) {
           continue;
         }
-        if (!isBackgroundCapableTurnItemType(item.type)) {
+        if (
+          !isBackgroundCapableTurnItemType(item.type) &&
+          !(item.type === "system_notice" && item.job)
+        ) {
           continue;
         }
         if (!isNonterminalTurnItemStatus(item.status) || isAppOwnedDelegationItem(item)) {

@@ -256,8 +256,8 @@ export function applyOrchestrationV2ProjectionEvent(
         !projection.turnItems.some((candidate) => candidate.id === event.payload.id) &&
         !(
           event.payload.type === "system_notice" &&
-          event.payload.headsUp !== undefined &&
-          event.payload.headsUp.resolution === undefined
+          (event.payload.job !== undefined ||
+            (event.payload.headsUp !== undefined && event.payload.headsUp.resolution === undefined))
         ) &&
         shouldDropMissingPartialTurnItem(projection, event.payload, latestLocalTurnOrdinal)
       ) {
