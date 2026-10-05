@@ -1,5 +1,8 @@
 import { assert, it } from "@effect/vitest";
 import {
+  CommandId,
+  EventId,
+  type OrchestrationV2Subagent,
   MessageId,
   type ModelSelection,
   NodeId,
@@ -1431,3 +1434,224 @@ layer("ProviderEventIngestorV2", (it) => {
     }),
   );
 });
+
+it.effect("copies app-owned child heads-ups once to their owner without waking an agent", () =>
+  Effect.gen(function* () {
+    const now = yield* DateTime.now;
+    const sink = yield* EventSink.EventSinkV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+    const ids = yield* IdAllocator.IdAllocatorV2;
+    const parent = yield* threadCreatedEvent(now);
+    if (parent.type !== "thread.created") throw new Error("Expected thread fixture");
+    const childId = ids.derive.delegatedTaskThread({ commandId: CommandId.make("ysk-child") });
+    const taskId = NodeId.make("ysk-task");
+    const child = {
+      ...parent.payload,
+      id: childId,
+      title: "Check tests",
+      lineage: {
+        parentThreadId: parent.threadId,
+        relationshipToParent: "subagent" as const,
+        rootThreadId: parent.threadId,
+      },
+      forkedFrom: { type: "node" as const, nodeId: taskId },
+    };
+    yield* sink.write({
+      events: [
+        parent,
+        {
+          id: yield* ids.allocate.event({ threadId: childId }),
+          type: "thread.created",
+          threadId: childId,
+          occurredAt: now,
+          payload: child,
+        },
+      ],
+    });
+    const providerSessionId = yield* ids.allocate.providerSession({
+      providerInstanceId: modelSelection.instanceId,
+      threadId: childId,
+    });
+    const notice = {
+      id: TurnItemId.make("ysk-notice"),
+      threadId: childId,
+      runId: null,
+      nodeId: null,
+      providerThreadId: ids.derive.providerThread({
+        driver: ProviderDriverKind.make("pi"),
+        nativeThreadId: "ysk-provider-child",
+      }),
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 1,
+      status: "completed",
+      title: "Heads up",
+      startedAt: now,
+      completedAt: now,
+      updatedAt: now,
+      type: "system_notice",
+      message: "[ysk:n1] Heads up · The e2e suite is separate (package.json)\n\nRun both suites.",
+    } satisfies OrchestrationV2TurnItem;
+    const ingest = (item: OrchestrationV2TurnItem = notice) =>
+      ingestor.ingestNormalized({
+        providerSessionId,
+        providerInstanceId: modelSelection.instanceId,
+        threadId: childId,
+        event: { type: "turn_item.updated", driver: ProviderDriverKind.make("pi"), turnItem: item },
+      });
+    const task = {
+      id: taskId,
+      threadId: parent.threadId,
+      runId: null,
+      parentNodeId: NodeId.make("ysk-root"),
+      origin: "app_owned" as const,
+      createdBy: "agent" as const,
+      driver: ProviderDriverKind.make("pi"),
+      providerInstanceId: modelSelection.instanceId,
+      providerThreadId: null,
+      childThreadId: childId,
+      nativeTaskRef: null,
+      prompt: "Check tests",
+      title: "Test reviewer",
+      model: "gpt-6.1-sol",
+      status: "running" as const,
+      result: null,
+      startedAt: now,
+      completedAt: null,
+      updatedAt: now,
+    };
+    const setTask = (payload: OrchestrationV2Subagent) =>
+      sink.write({
+        events: [
+          {
+            id: EventId.make(`ysk-task-${payload.origin}-${payload.childThreadId}`),
+            type: "subagent.updated",
+            threadId: parent.threadId,
+            occurredAt: now,
+            payload,
+          },
+        ],
+      });
+    // Lineage alone does not authorize forwarding, nor does a native or mismatched task.
+    assert.lengthOf(yield* ingest(), 1);
+    yield* setTask({ ...task, origin: "provider_native" });
+    assert.lengthOf(yield* ingest(), 1);
+    yield* setTask({ ...task, childThreadId: parent.threadId });
+    assert.lengthOf(yield* ingest(), 1);
+    yield* setTask(task);
+    // A stale run must commit neither copy.
+    assert.deepEqual(
+      yield* ingestor.ingestNormalized({
+        providerSessionId,
+        providerInstanceId: modelSelection.instanceId,
+        threadId: childId,
+        event: {
+          type: "turn_item.updated",
+          driver: ProviderDriverKind.make("pi"),
+          turnItem: notice,
+        },
+        writeIfRunCurrent: {
+          runId: RunId.make("stale-run"),
+          activeAttemptId: RunAttemptId.make("stale-attempt"),
+          expectedStatus: "running",
+        },
+      }),
+      [],
+    );
+    const first = yield* ingest();
+    assert.deepEqual(
+      first.map(({ event }) => [event.type, event.threadId]),
+      [
+        ["turn-item.updated", childId],
+        ["turn-item.updated", parent.threadId],
+      ],
+    );
+    const parentItems = (yield* projections.getThreadProjection(parent.threadId)).turnItems;
+    assert.lengthOf(parentItems, 1);
+    const forwarded = parentItems[0]!;
+    assert.equal(forwarded.type, "system_notice");
+    if (forwarded.type !== "system_notice") throw new Error("Expected notice");
+    assert.deepEqual(forwarded.headsUp, {
+      noteId: "n1",
+      tag: "Heads up",
+      line: "Test reviewer: The e2e suite is separate",
+      evidence: "package.json",
+      explanation: "Run both suites.",
+      sourceThreadId: childId,
+    });
+    assert.equal(forwarded.providerThreadId, notice.providerThreadId);
+    assert.equal(forwarded.nodeId, taskId);
+    const original = yield* projections.getTurnItem({ threadId: childId, itemId: notice.id });
+    assert.equal(
+      original?.type === "system_notice" && original.headsUp?.line,
+      "The e2e suite is separate",
+    );
+    // Answered copies cannot be resurrected by concurrent re-notifies with new native IDs.
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make("ysk-answer"),
+          type: "turn-item.updated",
+          threadId: parent.threadId,
+          occurredAt: now,
+          payload: { ...forwarded, headsUp: { ...forwarded.headsUp!, resolution: "dismiss" } },
+        },
+      ],
+    });
+    const repeated = yield* Effect.all(
+      [ingest(), ingest({ ...notice, id: TurnItemId.make("ysk-re-notify") })],
+      { concurrency: "unbounded" },
+    );
+    assert.deepEqual(
+      repeated.map((events) => events.length),
+      [1, 1],
+    );
+    const answered = yield* projections.getTurnItem({
+      threadId: parent.threadId,
+      itemId: forwarded.id,
+    });
+    assert.equal(answered?.type === "system_notice" && answered.headsUp?.resolution, "dismiss");
+    // A forwarded copy cannot be relayed onward, even if ingested again.
+    assert.lengthOf(
+      yield* ingest({
+        ...forwarded,
+        id: TurnItemId.make("ysk-forwarded-replay"),
+        threadId: childId,
+        headsUp: { ...forwarded.headsUp!, noteId: "forwarded-n2" },
+      }),
+      1,
+    );
+    assert.lengthOf(yield* ingest({ ...notice, message: "Ordinary provider notice" }), 1);
+    // Same note ID from a sibling is independent, not globally deduplicated.
+    const siblingId = ids.derive.delegatedTaskThread({ commandId: CommandId.make("ysk-sibling") });
+    const siblingTask = {
+      ...task,
+      id: NodeId.make("ysk-sibling-task"),
+      childThreadId: siblingId,
+      title: "Sibling",
+    };
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make("ysk-sibling-thread"),
+          type: "thread.created",
+          threadId: siblingId,
+          occurredAt: now,
+          payload: {
+            ...child,
+            id: siblingId,
+            forkedFrom: { type: "node", nodeId: siblingTask.id },
+          },
+        },
+      ],
+    });
+    yield* setTask(siblingTask);
+    assert.lengthOf(
+      yield* ingest({ ...notice, id: TurnItemId.make("ysk-sibling-notice"), threadId: siblingId }),
+      2,
+    );
+    assert.lengthOf((yield* projections.getThreadProjection(parent.threadId)).turnItems, 2);
+  }).pipe(Effect.provide(TestLayer)),
+);
