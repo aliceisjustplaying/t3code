@@ -28,6 +28,7 @@ import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import {
   defaultInstanceIdForDriver,
   PiSettings,
+  OrchestrationV2Job,
   ProviderDriverKind,
   type ChatAttachment,
   type ModelSelection,
@@ -100,6 +101,9 @@ import { PI_FILE_CHANGE_TOOLS } from "./piT3McpExtensionSource.ts";
 export const PI_PROVIDER = ProviderDriverKind.make("pi");
 const PI_DRIVER_KIND = PI_PROVIDER;
 const PI_DEFAULT_INSTANCE_ID = defaultInstanceIdForDriver(PI_DRIVER_KIND);
+const decodeJob = Schema.decodeUnknownOption(OrchestrationV2Job);
+const decodeJobJson = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
+
 const DEFAULT_PI_SETTINGS = Schema.decodeSync(PiSettings)({});
 
 /**
@@ -489,6 +493,7 @@ export function makePiAdapterV2(
       let threadState: PiThreadState | null = null;
       let backgroundProbe: Deferred.Deferred<boolean> | undefined;
       let noticeOrdinal = 0;
+      const jobs = new Map<string, Extract<OrchestrationV2TurnItem, { type: "system_notice" }>>();
       let registrationAttempted = false;
       let lastNativeThreadId: string | null = null;
       // User Stop intentionally tears down this RPC process after aborting.
@@ -1195,10 +1200,91 @@ export function makePiAdapterV2(
           });
         });
 
+      const receiveJob = Effect.fnUntraced(function* (data: unknown) {
+        const state = threadState;
+        if (state === null || typeof data !== "object" || data === null) return;
+        const decoded = decodeJob({
+          ...data,
+          providerSessionId: input.providerSessionId,
+        });
+        if (Option.isNone(decoded)) return;
+        const { sourceThreadId: _source, sourceTitle: _title, ...job } = decoded.value;
+        if (
+          !Number.isFinite(job.startedAt) ||
+          (job.endedAt !== null && !Number.isFinite(job.endedAt))
+        )
+          return;
+        const startedAt = DateTime.make(job.startedAt);
+        const endedAt = job.endedAt === null ? Option.none() : DateTime.make(job.endedAt);
+        if (Option.isNone(startedAt) || (job.endedAt !== null && Option.isNone(endedAt))) return;
+        const key = [
+          "wake",
+          input.providerSessionId,
+          state.providerThread.id,
+          job.scope,
+          job.id,
+        ].join(":");
+        const previous = jobs.get(key);
+        if (previous?.job && previous.job.state !== "running" && previous.job.state !== "stopping")
+          return;
+        const now = yield* DateTime.now;
+        const active = job.state === "running" || job.state === "stopping";
+        const item: Extract<OrchestrationV2TurnItem, { type: "system_notice" }> = {
+          id:
+            previous?.id ??
+            idAllocator.derive.turnItemFromProviderItem({ driver: PI_PROVIDER, nativeItemId: key }),
+          threadId: state.providerThread.appThreadId ?? input.threadId,
+          runId: previous ? previous.runId : (state.activeTurn?.turnInput.runId ?? null),
+          nodeId: null,
+          providerThreadId: state.providerThread.id,
+          providerTurnId: null,
+          nativeItemRef: providerRef(key),
+          parentItemId: null,
+          ordinal: previous?.ordinal ?? noticeOrdinal++,
+          startedAt: startedAt.value,
+          completedAt: active ? null : Option.getOrElse(endedAt, () => now),
+          updatedAt: now,
+          status: active ? "running" : job.state === "failed" ? "failed" : "completed",
+          type: "system_notice",
+          title: job.name,
+          message: "",
+          job,
+        };
+        jobs.set(key, item);
+        yield* emit({ type: "turn_item.updated", driver: PI_PROVIDER, turnItem: item });
+      });
+
+      const retireJobs = Effect.gen(function* () {
+        const now = yield* DateTime.now;
+        for (const item of jobs.values()) {
+          if (!item.job || (item.job.state !== "running" && item.job.state !== "stopping"))
+            continue;
+          yield* emit({
+            type: "turn_item.updated",
+            driver: PI_PROVIDER,
+            turnItem: {
+              ...item,
+              status: "cancelled",
+              completedAt: now,
+              updatedAt: now,
+              job: { ...item.job, state: "lost", endedAt: DateTime.toEpochMillis(now) },
+            },
+          });
+        }
+        jobs.clear();
+      });
+
       const handleExtensionUiRequest = Effect.fnUntraced(function* (event: PiRpcRecord) {
         const method = recordString(event, "method");
         const nativeRequestId = recordString(event, "id");
         if (method === undefined) return;
+        if (method === "setStatus" && recordString(event, "statusKey") === "pi-wake:job") {
+          const text = recordString(event, "statusText");
+          if (text === undefined || text.length > 100_000) return;
+          const data = yield* decodeJobJson(text).pipe(Effect.orElseSucceed(() => null));
+          yield* receiveJob(data);
+          return;
+        }
         if (method === "setStatus" && recordString(event, "statusKey") === "t3:background-work") {
           if (backgroundProbe !== undefined) {
             yield* Deferred.succeed(
@@ -1641,7 +1727,17 @@ export function makePiAdapterV2(
         const state = threadState;
         const turn = state?.activeTurn ?? null;
         const type = String(event["type"]);
-        if (wake !== null && turn === null && type !== "response" && !type.startsWith("t3.")) {
+        const jobEvent =
+          (type === "extension_ui_request" && recordString(event, "statusKey") === "pi-wake:job") ||
+          (type === "message_end" &&
+            recordString(event["message"], "customType") === "pi-wake:job");
+        if (
+          wake !== null &&
+          turn === null &&
+          type !== "response" &&
+          !type.startsWith("t3.") &&
+          !jobEvent
+        ) {
           wake.events.push(event);
           return;
         }
@@ -1701,8 +1797,15 @@ export function makePiAdapterV2(
             return;
           }
           case "message_end": {
-            if (turn === null) return;
             const message = event["message"];
+            if (
+              recordString(message, "role") === "custom" &&
+              recordString(message, "customType") === "pi-wake:job"
+            ) {
+              yield* receiveJob(recordField(message, "details"));
+              return;
+            }
+            if (turn === null) return;
             if (recordString(message, "role") !== "assistant") return;
             yield* completeOpenStreamItems(turn);
             if (recordString(message, "stopReason") === "error" && turn.failure === null) {
@@ -2127,6 +2230,7 @@ export function makePiAdapterV2(
           lastNativeThreadId = resumeId ?? lastNativeThreadId;
           // Even a failed lifecycle operation can change Pi's native session.
           // Never leave the old app binding or model defaults usable afterward.
+          yield* retireJobs;
           threadState = null;
           appliedModel = null;
           appliedThinking = null;
@@ -2692,6 +2796,43 @@ export function makePiAdapterV2(
         // Notes come from the you-should-know extension, which keeps them in this
         // process. Its command runs at once, even mid-run, and never reaches the
         // model; a session without it would send the text to the model instead.
+        stopJob: (stopInput) =>
+          Effect.gen(function* () {
+            const state = threadState;
+            if (state === null || state.providerThread.id !== stopInput.providerThread.id)
+              return yield* protocolError("Job session is no longer hosted");
+            const item = [...jobs.values()].find(
+              (candidate) =>
+                candidate.job?.scope === stopInput.scope &&
+                candidate.job.id === stopInput.jobId &&
+                candidate.providerThreadId === state.providerThread.id,
+            );
+            if (!item?.job || (item.job.state !== "running" && item.job.state !== "stopping"))
+              return yield* protocolError("Job is no longer running in this session");
+            const commands = recordField(yield* request({ type: "get_commands" }), "commands");
+            if (
+              !Array.isArray(commands) ||
+              !commands.some(
+                (command) =>
+                  recordString(command, "name") === "wake-stop" &&
+                  recordString(command, "source") === "extension",
+              )
+            )
+              return yield* protocolError("The wake stop command is unavailable");
+            yield* request({
+              type: "prompt",
+              message: "/wake-stop " + stopInput.scope + " " + stopInput.jobId,
+            });
+          }).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapter.ProviderAdapterProtocolError({
+                  driver: PI_PROVIDER,
+                  detail: "Could not stop the owning job",
+                  cause,
+                }),
+            ),
+          ),
         answerHeadsUp: (answer) =>
           Effect.gen(function* () {
             const nativeId = answer.providerThread.nativeThreadRef?.nativeId;
@@ -2878,6 +3019,7 @@ export function makePiAdapterV2(
             if (recordField(forkData, "cancelled") === true) {
               return yield* protocolError("A Pi extension cancelled the session fork");
             }
+            yield* retireJobs;
             // Pi fork replaces the session file, including for rollback. Persist
             // its new identity before any later request can fail or restart.
             // An interrupted read leaves the identity just as unknown as a failed one.
