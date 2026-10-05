@@ -1730,6 +1730,16 @@ export function NewTaskDraftScreen(props: {
         <View className="px-[14px]">{promptEditor}</View>
         <View className="h-1" />
 
+        {flow.selectedProviderStatus && flow.selectedProviderStatus.driver !== "pi" ? (
+          <Text
+            accessibilityLiveRegion="polite"
+            className="px-[14px] pb-2 text-xs text-warning-foreground"
+          >
+            YSK checks are unavailable for non-Pi engines. Only threads using Pi receive automatic
+            “You should know” notes.
+          </Text>
+        ) : null}
+
         <Animated.View layout={COMPOSER_LAYOUT_TRANSITION} collapsable={false}>
           <ComposerDictationToolbar showsDictation={isVoiceInputPresented}>
             <ComposerToolbarRow
