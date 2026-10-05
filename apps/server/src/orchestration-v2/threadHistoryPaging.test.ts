@@ -1,6 +1,8 @@
 import {
   MessageId,
   NodeId,
+  ProviderSessionId,
+  ProviderThreadId,
   RunId,
   ThreadId,
   TurnItemId,
@@ -174,6 +176,73 @@ describe("threadHistoryPaging", () => {
     expect(item.latestLocalTurnOrdinal).toBe(90);
     expect(item.payloadBudgetExceeded).toBe(false);
   });
+
+  it.each([4, 21, 24])(
+    "retains old local and child jobs through the final wire snapshot with byte accounting (%i jobs)",
+    (jobCount) => {
+      const jobs = Array.from({ length: jobCount }, (_, index) => {
+        const row = makeRow(index);
+        const active = index % 2 === 0;
+        const child = index % 4 >= 2;
+        const item: OrchestrationV2TurnItem = {
+          ...row.item,
+          type: "system_notice",
+          message: "",
+          status: active ? "running" : "completed",
+          completedAt: active ? null : NOW,
+          providerThreadId: ProviderThreadId.make(child ? "child-provider" : "local-provider"),
+          job: {
+            version: 1,
+            scope: "live-runtime",
+            id: String(index + 1),
+            name: "Build",
+            command: "make",
+            cwd: "/tmp",
+            state: active ? "running" : "succeeded",
+            startedAt: DateTime.toEpochMillis(NOW),
+            endedAt: active ? null : DateTime.toEpochMillis(NOW),
+            exitCode: active ? null : 0,
+            signal: null,
+            // Maximum valid output, with UTF-8 cost exceeding character count.
+            output: "界".repeat(16_000),
+            providerSessionId: ProviderSessionId.make("job-session"),
+            ...(child ? { sourceThreadId: ThreadId.make("child-thread") } : {}),
+          },
+        };
+        return { ...row, item };
+      });
+      const recent = Array.from({ length: 100 }, (_, index) => makeRow(jobCount + index));
+      const snapshot = buildBoundedThreadStreamSnapshot({
+        snapshotSequence: 23,
+        projection: makeProjection([...jobs, ...recent]),
+      });
+
+      expect(snapshot.projection.turnItems.filter((item) => item.type === "system_notice")).toEqual(
+        jobs.map((row) => row.item),
+      );
+      expect(
+        snapshot.projection.visibleTurnItems.every((row) => row.item.type === "command_execution"),
+      ).toBe(true);
+      expect(snapshot.hasMoreHistory).toBe(true);
+      expect(snapshot.historyCursor).not.toBeNull();
+      const bytes = Buffer.byteLength(JSON.stringify(snapshot.projection), "utf8");
+      if (jobCount === 24) {
+        // Control state alone exceeds the soft cap: report it, never lose Stop.
+        expect(bytes).toBeGreaterThan(THREAD_HISTORY_PAGE_POLICY.maxEncodedBytes);
+        expect(snapshot.payloadBudgetExceeded).toBe(true);
+        expect(snapshot.projection.visibleTurnItems).toHaveLength(1);
+      } else {
+        expect(bytes).toBeLessThanOrEqual(THREAD_HISTORY_PAGE_POLICY.maxEncodedBytes);
+        expect(snapshot.payloadBudgetExceeded).toBe(false);
+        expect(snapshot.projection.visibleTurnItems.length).toBeGreaterThan(1);
+        if (jobCount === 21) {
+          expect(snapshot.projection.visibleTurnItems.length).toBeLessThan(
+            THREAD_HISTORY_PAGE_POLICY.maxItems,
+          );
+        }
+      }
+    },
+  );
 
   it("keeps background turns with user turns, with main's 150-turn fan-out ceiling", () => {
     const items = Array.from({ length: 161 }, (_, turn) => {
