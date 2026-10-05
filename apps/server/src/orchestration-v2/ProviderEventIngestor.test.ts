@@ -1522,11 +1522,14 @@ it.effect("copies app-owned child heads-ups once to their owner without waking a
       completedAt: null,
       updatedAt: now,
     };
+    let taskRevision = 0;
     const setTask = (payload: OrchestrationV2Subagent) =>
       sink.write({
         events: [
           {
-            id: EventId.make(`ysk-task-${payload.origin}-${payload.childThreadId}`),
+            id: EventId.make(
+              `ysk-task-${taskRevision++}-${payload.origin}-${payload.childThreadId}`,
+            ),
             type: "subagent.updated",
             threadId: parent.threadId,
             occurredAt: now,
@@ -1624,6 +1627,58 @@ it.effect("copies app-owned child heads-ups once to their owner without waking a
       1,
     );
     assert.lengthOf(yield* ingest({ ...notice, message: "Ordinary provider notice" }), 1);
+    // Jobs share app-owned visibility, but updates replace the parent copy instead of deduplicating it.
+    const job = {
+      ...notice,
+      id: TurnItemId.make("wake-child-1"),
+      message: "",
+      status: "running" as const,
+      completedAt: null,
+      job: {
+        version: 1 as const,
+        scope: "child-runtime",
+        id: "1",
+        name: "Build",
+        command: "make",
+        cwd: "/tmp",
+        state: "running" as const,
+        startedAt: DateTime.toEpochMillis(now),
+        endedAt: null,
+        exitCode: null,
+        signal: null,
+        output: "",
+        providerSessionId,
+      },
+    };
+    yield* setTask({ ...task, origin: "provider_native" });
+    assert.lengthOf(yield* ingest(job), 1);
+    yield* setTask(task);
+    const forwardedJob = yield* ingest(job);
+    assert.lengthOf(forwardedJob, 2);
+    yield* ingest({
+      ...job,
+      status: "failed",
+      completedAt: now,
+      job: {
+        ...job.job,
+        state: "failed",
+        exitCode: 7,
+        output: "build failed",
+        endedAt: DateTime.toEpochMillis(now),
+      },
+    });
+    const parentJobs = (yield* projections.getThreadProjection(parent.threadId)).turnItems.filter(
+      (item) => item.type === "system_notice" && item.job,
+    );
+    assert.lengthOf(parentJobs, 1);
+    const parentJob = parentJobs[0];
+    assert.isTrue(parentJob?.type === "system_notice");
+    if (parentJob?.type === "system_notice") {
+      assert.equal(parentJob.job?.sourceThreadId, childId);
+      assert.equal(parentJob.job?.sourceTitle, "Test reviewer");
+      assert.equal(parentJob.job?.output, "build failed");
+      assert.equal(parentJob.job?.state, "failed");
+    }
     // Same note ID from a sibling is independent, not globally deduplicated.
     const siblingId = ids.derive.delegatedTaskThread({ commandId: CommandId.make("ysk-sibling") });
     const siblingTask = {
@@ -1652,6 +1707,11 @@ it.effect("copies app-owned child heads-ups once to their owner without waking a
       yield* ingest({ ...notice, id: TurnItemId.make("ysk-sibling-notice"), threadId: siblingId }),
       2,
     );
-    assert.lengthOf((yield* projections.getThreadProjection(parent.threadId)).turnItems, 2);
+    assert.lengthOf(
+      (yield* projections.getThreadProjection(parent.threadId)).turnItems.filter(
+        (item) => item.type === "system_notice" && item.headsUp,
+      ),
+      2,
+    );
   }).pipe(Effect.provide(TestLayer)),
 );
