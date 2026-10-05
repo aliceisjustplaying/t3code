@@ -2130,6 +2130,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // disabled.
   const selectedProvider: ProviderDriverKind =
     selectedProviderEntry?.driverKind ?? requestedDriverKind;
+  const showYskUnavailableWarning =
+    routeKind === "draft" &&
+    (multipleModelSelections !== null
+      ? multipleModelSelections.some((selection) => {
+          const entry = providerInstanceEntries.find(
+            (candidate) => candidate.instanceId === selection.instanceId,
+          );
+          return entry !== undefined && entry.driverKind !== "pi";
+        })
+      : selectedProviderEntry !== undefined && selectedProvider !== "pi");
   const supportedRuntimeModes = selectedProviderEntry?.snapshot.supportedRuntimeModes;
   const compatibleRuntimeModeOptions =
     supportedRuntimeModes && supportedRuntimeModes.length > 0
@@ -7428,6 +7438,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             <ComposerPromptLengthValidation
               message={providerInputSubmissionError ?? composerSubmissionError}
             />
+
+            {showYskUnavailableWarning ? (
+              <p role="status" className="px-3 pb-2 text-xs text-warning-foreground sm:px-4">
+                YSK checks are unavailable for non-Pi engines. Only threads using Pi receive
+                automatic “You should know” notes.
+              </p>
+            ) : null}
 
             {/* Bottom toolbar */}
             {isComposerCollapsedMobile || isComposerApprovalState ? null : (
