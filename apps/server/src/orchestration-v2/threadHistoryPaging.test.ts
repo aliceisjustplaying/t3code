@@ -700,3 +700,40 @@ describe("threadHistoryPaging", () => {
     expect(bounded.payloadBudgetExceeded).toBe(false);
   });
 });
+
+it.each([undefined, ThreadId.make("child-thread")])(
+  "keeps restored heads-ups outside the transcript window (source %s)",
+  (sourceThreadId) => {
+    const old = makeRow(0);
+    const note: OrchestrationV2TurnItem = {
+      ...old.item,
+      providerThreadId: null,
+      type: "system_notice",
+      message: "Heads up",
+      headsUp: {
+        noteId: "old-note",
+        tag: "Heads up",
+        line: "Keep this note",
+        ...(sourceThreadId ? { sourceThreadId } : {}),
+      },
+    };
+    const recent = makeRow(1);
+    for (const resolution of ["dismiss", undefined] as const) {
+      const item = {
+        ...note,
+        headsUp: { ...note.headsUp!, ...(resolution ? { resolution } : {}) },
+      };
+      const bounded = buildBoundedThreadProjection({
+        projection: makeProjection([{ ...old, item }, recent]),
+        snapshotSequence: 3,
+        policy: { maxItems: 1, maxEncodedBytes: 10_000_000 },
+      });
+      expect(bounded.projection.turnItems.some((candidate) => candidate.id === note.id)).toBe(
+        resolution === undefined,
+      );
+      expect(bounded.projection.visibleTurnItems.map((row) => row.sourceItemId)).toEqual([
+        recent.sourceItemId,
+      ]);
+    }
+  },
+);
