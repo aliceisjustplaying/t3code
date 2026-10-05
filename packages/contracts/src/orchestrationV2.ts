@@ -1332,6 +1332,34 @@ export const OrchestrationV2HeadsUp = Schema.Struct({
 });
 export type OrchestrationV2HeadsUp = typeof OrchestrationV2HeadsUp.Type;
 
+/** A live pi-wake process, not a terminal or an agent run. */
+export const OrchestrationV2Job = Schema.Struct({
+  version: Schema.Literal(1),
+  scope: Schema.String.check(Schema.isPattern(/^[\w-]{1,80}$/)),
+  id: Schema.String.check(Schema.isPattern(/^\d{1,20}$/)),
+  name: Schema.String.check(Schema.isMaxLength(256)),
+  command: Schema.String.check(Schema.isMaxLength(8192)),
+  cwd: Schema.String.check(Schema.isMaxLength(4096)),
+  state: Schema.Literals([
+    "running",
+    "stopping",
+    "succeeded",
+    "failed",
+    "timed_out",
+    "stopped",
+    "lost",
+  ]),
+  startedAt: Schema.Number,
+  endedAt: Schema.NullOr(Schema.Number),
+  exitCode: Schema.NullOr(Schema.Number),
+  signal: Schema.NullOr(Schema.String),
+  output: Schema.String.check(Schema.isMaxLength(16000)),
+  providerSessionId: ProviderSessionId,
+  sourceThreadId: Schema.optional(ThreadId),
+  sourceTitle: Schema.optional(Schema.String),
+});
+export type OrchestrationV2Job = typeof OrchestrationV2Job.Type;
+
 const OrchestrationV2TurnItemBaseFields = {
   toolNonExecutionKind: Schema.optional(Schema.String),
   toolSurface: Schema.optional(ToolActivitySurface),
@@ -1508,6 +1536,7 @@ export const OrchestrationV2TurnItem = Schema.Union([
     type: Schema.Literal("system_notice"),
     message: Schema.String,
     headsUp: Schema.optional(OrchestrationV2HeadsUp),
+    job: Schema.optional(OrchestrationV2Job),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
@@ -2287,6 +2316,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     type: Schema.Literal("system_notice"),
     message: Schema.String,
     headsUp: Schema.optional(OrchestrationV2HeadsUp),
+    job: Schema.optional(OrchestrationV2Job),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
@@ -2991,6 +3021,12 @@ export const OrchestrationV2Command = Schema.Union([
     commandId: CommandId,
     threadId: ThreadId,
     requestId: RuntimeRequestId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.job.stop"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    turnItemId: TurnItemId,
   }),
   /** Resolve a heads-up note; `null` puts it back above the composer. */
   Schema.Struct({

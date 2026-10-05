@@ -97,6 +97,7 @@ export type ThreadGitMenuProps = {
 };
 
 type ThreadGitControlsProps = ThreadGitMenuProps & {
+  readonly jobsMenu?: ScreenHeaderMenu;
   readonly auxiliaryPaneControl?: {
     readonly accessibilityLabel: string;
     readonly onPress: () => void;
@@ -381,6 +382,49 @@ function useThreadGitHeaderActionItems(props: ThreadGitControlsProps): ThreadGit
               onPress: model.openReview,
               type: "action",
             },
+            ...(props.jobsMenu
+              ? [
+                  {
+                    type: "menu" as const,
+                    label: props.jobsMenu.title,
+                    menu: {
+                      title: props.jobsMenu.title,
+                      items: props.jobsMenu.items.flatMap<HeaderItem>((item) =>
+                        "items" in item
+                          ? [
+                              {
+                                type: "menu" as const,
+                                label: item.title,
+                                menu: {
+                                  title: item.title,
+                                  items: item.items.flatMap((child) =>
+                                    "onPress" in child
+                                      ? [
+                                          {
+                                            type: "action" as const,
+                                            label: child.title,
+                                            description: child.subtitle,
+                                            onPress: child.onPress,
+                                          },
+                                        ]
+                                      : [],
+                                  ),
+                                },
+                              },
+                            ]
+                          : [
+                              {
+                                type: "action" as const,
+                                label: item.title,
+                                description: item.subtitle,
+                                onPress: item.onPress,
+                              },
+                            ],
+                      ),
+                    },
+                  },
+                ]
+              : []),
             ...(props.onMergeBack
               ? [
                   {
@@ -423,6 +467,7 @@ function useThreadGitHeaderActionItems(props: ThreadGitControlsProps): ThreadGit
       props.canOperateTerminal,
       props.gitStatus,
       props.onMergeBack,
+      props.jobsMenu,
       props.onOpenNewTerminal,
       props.onOpenTerminal,
       props.onRunProjectScript,
@@ -458,6 +503,7 @@ export function ThreadGitControls(props: ThreadGitControlsProps) {
 
   return (
     <NativeHeaderToolbar placement="right">
+      {props.jobsMenu ? createNativeHeaderMenu(props.jobsMenu) : null}
       {showActionControls && props.auxiliaryPaneControl ? (
         <NativeHeaderToolbar.Button
           accessibilityLabel={props.auxiliaryPaneControl.accessibilityLabel}

@@ -468,6 +468,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "queued-run.edit":
     case "runtime-request.respond":
     case "thread.user-input.dismiss":
+    case "thread.job.stop":
     case "thread.heads-up.resolve":
     case "checkpoint.rollback":
     case "checkpoint.rollback.fail":
@@ -7288,6 +7289,59 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ]);
     });
 
+  const dispatchThreadJobStop = (
+    command: Extract<OrchestrationV2Command, { readonly type: "thread.job.stop" }>,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
+  ) =>
+    Effect.gen(function* () {
+      const projection = yield* loadProjectionForCommand(command, ["turnItems"], {
+        turnItemTypes: ["system_notice"],
+      });
+      const item = projection.turnItems.find((candidate) => candidate.id === command.turnItemId);
+      if (
+        item?.type !== "system_notice" ||
+        !item.job ||
+        item.providerThreadId === null ||
+        item.status !== "running" ||
+        (item.job.state !== "running" && item.job.state !== "stopping")
+      ) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "This job is no longer running.",
+        });
+      }
+      const job = item.job;
+      const now = yield* DateTime.now;
+      // Commit the accepted request without claiming the process stopped. Only
+      // the owning runtime's next snapshot can change the observed job state.
+      yield* emit(
+        events,
+        command,
+      )({
+        type: "turn-item.updated",
+        threadId: command.threadId,
+        occurredAt: now,
+        payload: { ...item, updatedAt: now },
+      });
+      yield* Ref.update(effects, (existing) => [
+        ...existing,
+        {
+          id: "effect:" + command.commandId + ":provider-job.stop",
+          commandId: command.commandId,
+          threadId: job.sourceThreadId ?? command.threadId,
+          request: {
+            type: "provider-job.stop",
+            providerThreadId: item.providerThreadId!,
+            providerSessionId: job.providerSessionId,
+            scope: job.scope,
+            jobId: job.id,
+          },
+        } satisfies PendingOrchestrationEffectV2,
+      ]);
+    });
+
   const dispatchThreadHeadsUpResolve = (
     command: Extract<OrchestrationV2Command, { readonly type: "thread.heads-up.resolve" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
@@ -10340,6 +10394,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         break;
       case "thread.user-input.dismiss":
         yield* dispatchThreadUserInputDismiss(command, events, effects);
+        break;
+      case "thread.job.stop":
+        yield* dispatchThreadJobStop(command, events, effects);
         break;
       case "thread.heads-up.resolve":
         yield* dispatchThreadHeadsUpResolve(command, events, effects);

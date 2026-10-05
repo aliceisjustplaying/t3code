@@ -762,6 +762,100 @@ describe("PiAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  it.effect(
+    "projects wake job snapshots outside turns and routes stops only to their live scope",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const { runtime, takeEvent } = yield* openRuntime(fake);
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        const snapshot = {
+          version: 1,
+          scope: "runtime-one",
+          id: "1",
+          name: "Build",
+          command: "make",
+          cwd: "/tmp",
+          state: "running",
+          startedAt: 1000,
+          endedAt: null,
+          exitCode: null,
+          signal: null,
+          output: "",
+          sourceThreadId: "forged",
+          providerSessionId: "forged",
+        };
+        const send = (data: unknown) =>
+          fake.emit({
+            type: "extension_ui_request",
+            method: "setStatus",
+            statusKey: "pi-wake:job",
+            statusText: encodeJsonLine(data),
+          });
+        const takeJob = takeEvent(
+          (event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.type === "system_notice" &&
+            event.turnItem.job !== undefined,
+        ).pipe(
+          Effect.map((event) => {
+            if (
+              event.type !== "turn_item.updated" ||
+              event.turnItem.type !== "system_notice" ||
+              !event.turnItem.job
+            )
+              throw new Error("Expected job");
+            return event.turnItem;
+          }),
+        );
+        yield* send(snapshot);
+        const started = yield* takeJob;
+        assert.equal(started.job?.providerSessionId, SESSION_ID);
+        assert.isUndefined(started.job?.sourceThreadId);
+        assert.isNull(started.runId);
+        yield* send({ ...snapshot, output: "building" });
+        const updated = yield* takeJob;
+        assert.equal(updated.id, started.id);
+        assert.equal(updated.job?.output, "building");
+        const wrong = yield* Effect.exit(
+          runtime.stopJob!({ providerThread, scope: "another-runtime", jobId: "1" }),
+        );
+        assert.equal(wrong._tag, "Failure");
+        assert.isFalse(fake.allRequests().some((request) => request["type"] === "prompt"));
+        fake.queueCommands({ commands: [{ name: "wake-stop", source: "extension" }] });
+        yield* runtime.stopJob!({ providerThread, scope: "runtime-one", jobId: "1" });
+        assert.equal((yield* fake.takeRequest("prompt"))["message"], "/wake-stop runtime-one 1");
+        for (const [index, state] of ["succeeded", "failed", "timed_out", "stopped"].entries()) {
+          const data = {
+            ...snapshot,
+            scope: "finished-" + index,
+            state,
+            output: "last output",
+            endedAt: 2500,
+            exitCode: state === "succeeded" ? 0 : null,
+          };
+          yield* fake.emit({
+            type: "message_end",
+            message: { role: "custom", customType: "pi-wake:job", details: data },
+          });
+          const ended = yield* takeJob;
+          assert.equal(ended.job?.state, state);
+          assert.equal(ended.job?.output, "last output");
+          assert.equal(DateTime.toEpochMillis(ended.completedAt!), 2500);
+          assert.notEqual(ended.id, started.id);
+        }
+        // Invalid payloads must not leak into the durable stream; a later notification is a fence.
+        yield* send({ ...snapshot, output: "x".repeat(16001) });
+        yield* fake.emit({ type: "extension_ui_request", method: "notify", message: "fence" });
+        const next = yield* takeEvent((event) => event.type === "turn_item.updated");
+        assert.isTrue(next.type === "turn_item.updated" && next.turnItem.title === "fence");
+      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("pins idle sessions while extension work remains and releases when it ends", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;

@@ -370,6 +370,44 @@ export const layerExecutor: Layer.Layer<
                     }),
                 ),
               );
+          case "provider-job.stop": {
+            const request = effect.request;
+            return Effect.gen(function* () {
+              const { providerThreads } = yield* threads.getThreadRecords(effect.threadId, [
+                "providerThreads",
+              ]);
+              const providerThread = providerThreads.find(
+                (candidate) =>
+                  candidate.id === request.providerThreadId &&
+                  candidate.appThreadId === effect.threadId &&
+                  candidate.providerSessionId === request.providerSessionId,
+              );
+              const runtime = Option.getOrUndefined(
+                yield* providerSessions.get(request.providerSessionId),
+              );
+              // Never reopen a runtime to stop a process: numeric job IDs are process-local.
+              if (!providerThread || !runtime?.stopJob)
+                return yield* new OrchestrationEffectExecutionError({
+                  effectId: effect.id,
+                  effectType: request.type,
+                  cause: "The owning job session is no longer available",
+                });
+              yield* runtime.stopJob({
+                providerThread,
+                scope: request.scope,
+                jobId: request.jobId,
+              });
+            }).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationEffectExecutionError({
+                    effectId: effect.id,
+                    effectType: request.type,
+                    cause,
+                  }),
+              ),
+            );
+          }
           case "provider-heads-up.answer": {
             const request = effect.request;
             // Restore the source session when needed; notes and feedback survive process release.

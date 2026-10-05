@@ -1,5 +1,7 @@
 import { ThreadFind, ThreadFindCanvas, type ThreadFindControls } from "./chat/ThreadFindProvider";
 import { THREAD_FIND_BAR_RESERVED_HEIGHT } from "./chat/ThreadFindBar";
+import { ThreadJobDetails } from "./chat/ThreadJobsPanel";
+import type { TurnItemId } from "@t3tools/contracts";
 import { usageLimitRecoveryBannerItem } from "./chat/UsageLimitRecoveryBanner";
 import {
   resolveBackgroundDraftWorkspaceOptions,
@@ -1863,6 +1865,7 @@ export default function ChatView(props: ChatViewProps) {
   );
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const [isWorkspaceFileDragActive, setIsWorkspaceFileDragActive] = useState(false);
+  const [selectedJob, setSelectedJob] = useState<{ threadId: string; itemId: TurnItemId } | null>(null);
   const [expandedImage, setExpandedImage] = useState<ExpandedImagePreview | null>(null);
   useEffect(() => {
     const item = expandedImage?.images[expandedImage.index];
@@ -11098,6 +11101,10 @@ export default function ChatView(props: ChatViewProps) {
     ) : null
   ) : null;
   const threadDetailsPanelProps: ThreadDetailsPanelProps = {
+    onSelectJob: (itemId) => {
+      setSelectedJob({ threadId: activeThread.id, itemId });
+      useRightPanelStore.getState().setThreadPanelOpen({ environmentId: activeThread.environmentId, threadId: activeThread.id }, "popover", false);
+    },
     anchor: threadPanelPopoverAnchorRef,
     handle: threadPanelPopoverHandle,
     onPresentationChange: setThreadPanelPresentation,
@@ -11317,6 +11324,7 @@ export default function ChatView(props: ChatViewProps) {
             onDrop={workspaceFileDropHandlers.onDrop}
           >
             <ThreadFind onClose={focusComposer} />
+            <div className={selectedJob?.threadId === activeThread.id ? "hidden" : "contents"}>
             {isWorkspaceFileDragActive ? (
               <div
                 className="pointer-events-none absolute inset-2 z-40 flex items-center justify-center rounded-2xl border-2 border-dashed border-primary/60 bg-primary/[0.035]"
@@ -11860,6 +11868,10 @@ export default function ChatView(props: ChatViewProps) {
               </AlertDialogPopup>
             </AlertDialog>
 
+            </div>
+            {selectedJob?.threadId === activeThread.id && (
+              <ThreadJobDetails key={selectedJob.itemId} environmentId={activeThread.environmentId} threadId={activeThread.id} itemId={selectedJob.itemId} onClose={() => setSelectedJob(null)} />
+            )}
             <ThreadDetailsPanel {...threadDetailsPanelProps} />
 
             {pullRequestDialogState ? (

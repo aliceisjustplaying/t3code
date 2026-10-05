@@ -640,8 +640,55 @@ export const layerWithOptions = (
               } satisfies OrchestrationV2DomainEvent;
             }),
           );
-          if (events.length > 0) {
-            yield* eventSink.write({ events });
+          const releasedJobs: Array<OrchestrationV2DomainEvent> = [];
+          if (
+            input.runtime.stopJob !== undefined &&
+            (input.payload.status === "stopped" || input.payload.status === "error")
+          ) {
+            const threadIds = new Set(input.threadIds);
+            for (const threadId of [...threadIds]) {
+              const thread = yield* projectionStore.getThread(threadId);
+              if (
+                thread.lineage.relationshipToParent === "subagent" &&
+                thread.lineage.parentThreadId
+              )
+                threadIds.add(thread.lineage.parentThreadId);
+            }
+            for (const threadId of threadIds) {
+              const projection = yield* projectionStore.getThreadRecords(threadId, ["turnItems"], {
+                turnItemTypes: ["system_notice"],
+              });
+              for (const item of projection.turnItems) {
+                if (
+                  item.type !== "system_notice" ||
+                  !item.job ||
+                  item.job.providerSessionId !== input.runtime.providerSessionId ||
+                  item.status !== "running"
+                )
+                  continue;
+                releasedJobs.push({
+                  id: yield* idAllocator.allocate.event({
+                    threadId,
+                    providerSessionId: input.runtime.providerSessionId,
+                  }),
+                  type: "turn-item.updated",
+                  threadId,
+                  driver: input.runtime.driver,
+                  providerInstanceId: input.runtime.instanceId,
+                  occurredAt: now,
+                  payload: {
+                    ...item,
+                    status: "cancelled",
+                    completedAt: now,
+                    updatedAt: now,
+                    job: { ...item.job, state: "lost", endedAt: DateTime.toEpochMillis(now) },
+                  },
+                });
+              }
+            }
+          }
+          if (events.length > 0 || releasedJobs.length > 0) {
+            yield* eventSink.write({ events: [...events, ...releasedJobs] });
           }
         });
 

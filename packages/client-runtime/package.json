@@ -390,6 +390,10 @@
     "./state/mcp-apps": {
       "types": "./src/state/mcpApps.ts",
       "default": "./src/state/mcpApps.ts"
+    },
+    "./jobs": {
+      "types": "./src/jobs.ts",
+      "default": "./src/jobs.ts"
     }
   },
   "scripts": {

@@ -15,6 +15,7 @@ import {
   ProviderInstanceId,
   type ProviderSessionId,
   ThreadId,
+  TurnItemId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
@@ -310,6 +311,7 @@ function makeProviderAdapter(
   state: Ref.Ref<TestProviderRuntimeState>,
   options: {
     readonly failEventStream?: boolean;
+    readonly stopJob?: ProviderAdapterV2SessionRuntime["stopJob"];
     readonly capabilities?: OrchestrationV2ProviderCapabilities;
     readonly mcpConfigs?: Ref.Ref<
       ReadonlyArray<McpProviderSession.McpProviderSessionConfig | undefined>
@@ -396,6 +398,7 @@ function makeProviderAdapter(
           driver: CODEX_DRIVER,
           providerSessionId: input.providerSessionId,
           providerSession: session,
+          ...(options.stopJob ? { stopJob: options.stopJob } : {}),
           events: options.failEventStream
             ? Stream.fail(
                 new ProviderAdapterEventStreamError({
@@ -452,6 +455,7 @@ function layerTest(input: {
   readonly idleTimeoutMs: number;
   readonly maxIdlePinMs?: number;
   readonly failEventStream?: boolean;
+  readonly stopJob?: ProviderAdapterV2SessionRuntime["stopJob"];
   readonly capabilities?: OrchestrationV2ProviderCapabilities;
   readonly mcpConfigs?: Ref.Ref<
     ReadonlyArray<McpProviderSession.McpProviderSessionConfig | undefined>
@@ -489,6 +493,7 @@ function layerTest(input: {
   const layerRegistry = ProviderAdapterRegistry.layerSingle(
     makeProviderAdapter(input.state, {
       failEventStream: input.failEventStream ?? false,
+      ...(input.stopJob ? { stopJob: input.stopJob } : {}),
       ...(input.capabilities === undefined ? {} : { capabilities: input.capabilities }),
       ...(input.mcpConfigs === undefined ? {} : { mcpConfigs: input.mcpConfigs }),
       ...(input.beforeOpen === undefined ? {} : { beforeOpen: input.beforeOpen }),
@@ -4594,4 +4599,83 @@ it.effect(
       });
       assert.isFalse(denied?.capabilities?.has("device"));
     }),
+);
+
+it.effect("releasing a job-capable runtime retires only its own running jobs", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    yield* Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("job-release");
+      const providerSessionId = yield* ids.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      const anotherSessionId = yield* ids.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      yield* sink.write({
+        events: [yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now })],
+      });
+      for (const [index, sessionId] of [providerSessionId, anotherSessionId].entries()) {
+        yield* sink.write({
+          events: [
+            {
+              id: yield* ids.allocate.event({ threadId }),
+              type: "turn-item.updated",
+              threadId,
+              occurredAt: now,
+              payload: {
+                id: TurnItemId.make("job-release-" + index),
+                threadId,
+                runId: null,
+                nodeId: null,
+                providerThreadId: null,
+                providerTurnId: null,
+                nativeItemRef: null,
+                parentItemId: null,
+                ordinal: index,
+                status: "running",
+                title: "Build",
+                startedAt: now,
+                completedAt: null,
+                updatedAt: now,
+                type: "system_notice",
+                message: "",
+                job: {
+                  version: 1,
+                  scope: "runtime-" + index,
+                  id: "1",
+                  name: "Build",
+                  command: "make",
+                  cwd: "/tmp",
+                  state: "running",
+                  startedAt: DateTime.toEpochMillis(now),
+                  endedAt: null,
+                  exitCode: null,
+                  signal: null,
+                  output: "partial output",
+                  providerSessionId: sessionId,
+                },
+              },
+            },
+          ],
+        });
+      }
+      yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+      yield* manager.release({ providerSessionId, reason: "manual_shutdown" });
+      const projection = yield* projections.getThreadProjection(threadId);
+      const jobs = projection.turnItems.filter((item) => item.type === "system_notice");
+      assert.equal(jobs[0]?.job?.state, "lost");
+      assert.equal(jobs[0]?.job?.output, "partial output");
+      assert.equal(jobs[1]?.job?.state, "running");
+    }).pipe(
+      Effect.provide(makeTestLayer({ state, idleTimeoutMs: 1000, stopJob: () => Effect.void })),
+    );
+  }),
 );

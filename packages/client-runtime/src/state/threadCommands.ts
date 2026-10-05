@@ -73,6 +73,7 @@ import {
   respondToThreadUserInput,
   dismissThreadUserInput,
   resolveThreadHeadsUp,
+  stopThreadJob,
   revertThreadCheckpoint,
   setThreadInteractionMode,
   setThreadRuntimeMode,
@@ -306,6 +307,10 @@ export function createThreadEnvironmentAtoms<R, E>(
       execute: (input: DismissThreadUserInputInput) => dismissThreadUserInput(input),
       scheduler,
       concurrency,
+    }),
+    stopJob: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:stop-job",
+      execute: stopThreadJob,
     }),
     resolveHeadsUp: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:resolve-heads-up",

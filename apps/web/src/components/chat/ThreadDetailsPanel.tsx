@@ -4,6 +4,7 @@ import type {
   ProjectScript,
   ResolvedKeybindingsConfig,
   ThreadId,
+  TurnItemId,
 } from "@t3tools/contracts";
 
 import type { DraftId } from "../../composerDraftStore";
@@ -20,12 +21,14 @@ import { ThreadDetailsCard } from "./ThreadDetailsCard";
 import { OpenInPicker } from "./OpenInPicker";
 import { ThreadDetailsSection } from "./ThreadDetailsSection";
 import { ThreadAutomationsPanel } from "./ThreadAutomationsPanel";
+import { ThreadJobsPanel } from "./ThreadJobsPanel";
 import { ThreadRelationshipsPanel } from "./ThreadRelationshipsControl";
 
 export interface ThreadDetailsPanelProps extends Pick<
   ComponentProps<typeof ThreadDetailsCard>,
   "anchor" | "handle" | "onPresentationChange"
 > {
+  onSelectJob: (id: TurnItemId) => void;
   forceNewWorktree?: boolean;
   environmentId: EnvironmentId;
   threadId: ThreadId;
@@ -170,6 +173,14 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
                 ) : null}
               </div>
             </ThreadDetailsSection>
+          ) : null}
+
+          {!props.draftId ? (
+            <ThreadJobsPanel
+              environmentId={props.environmentId}
+              threadId={props.threadId}
+              onSelect={props.onSelectJob}
+            />
           ) : null}
 
           {density === "full" && !props.draftId ? (

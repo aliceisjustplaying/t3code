@@ -1754,6 +1754,7 @@ export function buildThreadFeed(
   for (const row of visibleTurnItems) {
     const item = row.item;
     if (turnItemIsWorkspacePreparation(item)) continue;
+    if (item.type === "system_notice" && item.job) continue;
     if (item.type === "todo_list" || item.type === "checkpoint") continue;
     if (item.type === "user_message" && foldedAnswerMessageIds.has(item.messageId)) continue;
     // Match the web timeline: only the terminal interrupt result is useful to

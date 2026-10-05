@@ -107,6 +107,7 @@ export function ThreadHeader(
               }
         }
         actions={androidHeaderActions}
+        menus={props.gitControls.jobsMenu ? [props.gitControls.jobsMenu] : []}
         hideBottomBorder
       />
       {native.fallback}

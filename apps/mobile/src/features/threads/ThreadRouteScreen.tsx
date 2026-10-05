@@ -1,3 +1,7 @@
+import { threadJobs, jobIsActive, jobStateLabel } from "@t3tools/client-runtime/jobs";
+import { formatDuration } from "@t3tools/shared/orchestrationTiming";
+import { ThreadJobDetails } from "./ThreadJobDetails";
+import type { ScreenHeaderMenu } from "../../components/ScreenHeader.types";
 import { makeTurnCommandMetadata } from "../../lib/commandMetadata";
 import { buildProjectThreadStartTurnInput } from "../../lib/projectThreadStartTurn";
 import { useWorktreeSetup } from "./use-worktree-setup";
@@ -243,6 +247,43 @@ function ThreadRouteContent(
   );
   const selectedThreadDetailState = props.selectedThreadDetailState;
   const selectedThreadDetail = Option.getOrNull(selectedThreadDetailState.data);
+  const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
+  const jobs = threadJobs(selectedThreadDetail?.turnItems ?? []);
+  const selectedJob = jobs.find((job) => job.turnItemId === selectedJobId);
+  const jobMenuItem = (job: (typeof jobs)[number]) => ({
+    id: job.turnItemId,
+    title: job.name,
+    subtitle: [
+      job.sourceTitle,
+      jobStateLabel[job.state],
+      formatDuration((job.endedAt ?? Date.now()) - job.startedAt),
+    ]
+      .filter(Boolean)
+      .join(" · "),
+    onPress: () => setSelectedJobId(job.turnItemId),
+  });
+  const priorityJobs = jobs.filter(
+    (job) => jobIsActive(job) || job.state === "failed" || job.state === "timed_out",
+  );
+  const finishedJobs = jobs.filter((job) => !priorityJobs.includes(job));
+  const jobsMenu: ScreenHeaderMenu | undefined = jobs.length
+    ? {
+        title: "Jobs · " + jobs.filter(jobIsActive).length + " running",
+        icon: "terminal",
+        items: [
+          ...priorityJobs.map(jobMenuItem),
+          ...(finishedJobs.length
+            ? [
+                {
+                  id: "finished-jobs",
+                  title: "Finished (" + finishedJobs.length + ")",
+                  items: finishedJobs.map(jobMenuItem),
+                },
+              ]
+            : []),
+        ],
+      }
+    : undefined;
   const { selectedThreadCwd } = useSelectedThreadWorktree();
   const composer = useThreadComposerState();
   const gitState = useSelectedThreadGitState();
@@ -737,6 +778,7 @@ function ThreadRouteContent(
     ],
   );
   const threadGitControlProps = {
+    jobsMenu,
     environmentId: environmentIdRaw ?? "",
     threadId: threadId ?? "",
     auxiliaryPaneControl:
@@ -1043,7 +1085,16 @@ function ThreadRouteContent(
         onReturnToThread={props.onReturnToThread}
       />
 
-      {renderThreadRouteBody()}
+      {selectedJob ? (
+        <ThreadJobDetails
+          environmentId={environmentId}
+          threadId={ThreadId.make(threadId)}
+          job={selectedJob}
+          onClose={() => setSelectedJobId(null)}
+        />
+      ) : (
+        renderThreadRouteBody()
+      )}
     </>
   );
 }

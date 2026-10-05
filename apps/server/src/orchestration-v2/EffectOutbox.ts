@@ -81,6 +81,13 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
     decision: Schema.optional(ProviderApprovalDecision),
     answers: Schema.optional(ProviderUserInputAnswers),
   }),
+  Schema.Struct({
+    type: Schema.Literal("provider-job.stop"),
+    providerThreadId: ProviderThreadId,
+    providerSessionId: ProviderSessionId,
+    scope: Schema.String,
+    jobId: Schema.String,
+  }),
   /** Tells the provider thread that raised a heads-up note how the user answered it. */
   Schema.Struct({
     type: Schema.Literal("provider-heads-up.answer"),
@@ -135,6 +142,7 @@ export const REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS = [
 ] as const satisfies ReadonlyArray<OrchestrationEffectRequestV2["type"]>;
 
 export const PROCESS_BOUND_EFFECT_TYPES = [
+  "provider-job.stop",
   "provider-turn.start",
   "provider-turn.interrupt",
   "provider-turn.steer",
