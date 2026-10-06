@@ -20,7 +20,11 @@ import { scopedThreadKey } from "../../lib/scopedEntities";
 import { headsUpInbox } from "../../state/headsUpInbox";
 import { useEnvironmentQuery } from "../../state/query";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { getComposerDraftSnapshot, setComposerDraftText } from "../../state/use-composer-drafts";
+import {
+  getComposerDraftSnapshot,
+  setComposerDraftText,
+  waitForComposerDraftsLoaded,
+} from "../../state/use-composer-drafts";
 import { RequestActionButton } from "./RequestActionButton";
 
 export function useHeadsUpInbox(environmentId: EnvironmentId, threadId: ThreadId) {
@@ -195,15 +199,25 @@ function InboxPages({
       if (mounted.current) setBusy(null);
     }
   };
-  const ask = (entry: HeadsUpInboxEntry) => {
-    const draftKey = scopedThreadKey(environmentId, entry.targetThreadId);
-    setComposerDraftText(
-      draftKey,
-      appendHeadsUpFollowUp(getComposerDraftSnapshot(draftKey).text, entry),
-    );
-    onClose();
-    if (threadId !== entry.targetThreadId)
-      navigation.navigate("Thread", { environmentId, threadId: entry.targetThreadId });
+  const ask = async (entry: HeadsUpInboxEntry) => {
+    setBusy(entry.id);
+    setActionError(null);
+    try {
+      await waitForComposerDraftsLoaded();
+      if (!mounted.current) return;
+      const draftKey = scopedThreadKey(environmentId, entry.targetThreadId);
+      setComposerDraftText(
+        draftKey,
+        appendHeadsUpFollowUp(getComposerDraftSnapshot(draftKey).text, entry),
+      );
+      onClose();
+      if (threadId !== entry.targetThreadId)
+        navigation.navigate("Thread", { environmentId, threadId: entry.targetThreadId });
+    } catch {
+      if (mounted.current) setActionError("The draft could not be updated. Try again.");
+    } finally {
+      if (mounted.current) setBusy(null);
+    }
   };
   const loadError = page.error ?? summary.error;
   return (
@@ -341,7 +355,7 @@ function InboxPages({
                   <RequestActionButton
                     label="Ask agent · Draft"
                     disabled={!connected || busy !== null}
-                    onPress={() => ask(entry)}
+                    onPress={() => void ask(entry)}
                   />
                 </View>
                 <Text className="text-xs text-foreground-muted">

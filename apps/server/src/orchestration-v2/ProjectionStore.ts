@@ -362,6 +362,12 @@ export interface ProjectionStoreV2Shape {
     readonly threadId: ThreadId;
     readonly itemId: TurnItemId;
   }) => Effect.Effect<OrchestrationV2TurnItem | null, ProjectionStoreV2Error>;
+  /** Threads holding a copy of this source-session notice, including repeated items. */
+  readonly getHeadsUpThreadIds: (input: {
+    readonly sourceThreadId: ThreadId;
+    readonly providerThreadId: ProviderThreadId | null;
+    readonly noteId: string;
+  }) => Effect.Effect<ReadonlyArray<ThreadId>, ProjectionStoreV2Error>;
   readonly getThreadRecords: <K extends ProjectionRecordField>(
     threadId: ThreadId,
     fields: ReadonlyArray<K>,
@@ -2443,6 +2449,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           case "thread.heads-up.updated": {
             // Patch only inbox state, not a stale complete turn item. A read on
             // another device must never race a Dismiss/Undo into losing its answer.
+            // Keep the identity-wide patch for older single-thread events on replay.
+            // Per-thread fan-out repeats this idempotent patch, never feedback.
             let payload = sql`payload_json`;
             if (event.payload.readAt !== undefined)
               payload = sql`json_set(${payload}, '$.headsUp.readAt', ${event.payload.readAt})`;
@@ -4747,6 +4755,19 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         Effect.mapError(controlReadError(threadId)),
       );
 
+    const getHeadsUpThreadIds: ProjectionStoreV2Shape["getHeadsUpThreadIds"] = (input) =>
+      sql<{
+        thread_id: string;
+      }>`SELECT DISTINCT thread_id FROM orchestration_v2_projection_turn_items
+        WHERE type = 'system_notice'
+          AND json_extract(payload_json, '$.headsUp.noteId') = ${input.noteId}
+          AND COALESCE(json_extract(payload_json, '$.headsUp.sourceThreadId'), thread_id) = ${input.sourceThreadId}
+          AND provider_thread_id IS ${input.providerThreadId}
+        ORDER BY thread_id`.pipe(
+        Effect.map((rows) => rows.map((row) => ThreadId.make(row.thread_id))),
+        Effect.mapError(controlReadError(input.sourceThreadId)),
+      );
+
     const getThreadAttachmentIds: ProjectionStoreV2Shape["getThreadAttachmentIds"] = (threadId) =>
       Effect.all([
         sql<{ id: string }>`
@@ -5988,6 +6009,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getMessageCount,
       getNextTurnItemOrdinal,
       getTurnItem,
+      getHeadsUpThreadIds,
       getThreadRecords,
       getRuntimeRequest,
       getPlan,
@@ -6251,6 +6273,24 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
           Effect.map(
             (state) =>
               state.projections.get(threadId)?.turnItems.find((item) => item.id === itemId) ?? null,
+          ),
+        ),
+      getHeadsUpThreadIds: (input) =>
+        Ref.get(replayState).pipe(
+          Effect.map((state) =>
+            [...state.projections.values()]
+              .filter((projection) =>
+                projection.turnItems.some(
+                  (item) =>
+                    item.type === "system_notice" &&
+                    item.headsUp !== undefined &&
+                    (item.headsUp.sourceThreadId ?? item.threadId) === input.sourceThreadId &&
+                    item.providerThreadId === input.providerThreadId &&
+                    item.headsUp.noteId === input.noteId,
+                ),
+              )
+              .map((projection) => projection.thread.id)
+              .sort(),
           ),
         ),
       getThreadAttachmentIds: (threadId) =>

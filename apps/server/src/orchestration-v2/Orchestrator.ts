@@ -7366,21 +7366,32 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
       const now = yield* DateTime.now;
       const sourceThreadId = item.headsUp.sourceThreadId ?? item.threadId;
-      yield* emit(
-        events,
-        command,
-      )({
-        type: "thread.heads-up.updated",
-        threadId: command.threadId,
-        occurredAt: now,
-        payload: {
-          sourceThreadId,
-          providerThreadId: item.providerThreadId,
-          noteId: item.headsUp.noteId,
-          readAt: DateTime.formatIso(now),
-          ...(command.type === "thread.heads-up.read" ? {} : { resolution: command.resolution }),
-        },
-      });
+      const identity = {
+        sourceThreadId,
+        providerThreadId: item.providerThreadId,
+        noteId: item.headsUp.noteId,
+      };
+      const copyThreadIds = yield* projectionStore
+        .getHeadsUpThreadIds(identity)
+        .pipe(
+          Effect.mapError(() => new OrchestratorProjectionError({ threadId: command.threadId })),
+        );
+      // Each thread's live/replay stream must carry the patch for its own copies.
+      for (const threadId of copyThreadIds) {
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "thread.heads-up.updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            ...identity,
+            readAt: DateTime.formatIso(now),
+            ...(command.type === "thread.heads-up.read" ? {} : { resolution: command.resolution }),
+          },
+        });
+      }
       // Only resolution/Undo sends extension feedback, always to the owning session.
       const providerThreadId = item.providerThreadId;
       const noteId = item.headsUp.noteId;
