@@ -11,9 +11,14 @@ import {
   type OrchestrationV2ProviderThread,
   type Project,
   ProjectId,
+  NodeId,
+  MessageId,
+  RunId,
+  ProviderSessionId,
+  type OrchestrationV2Run,
+  type OrchestrationV2TurnItem,
   ProviderDriverKind,
   ProviderInstanceId,
-  type ProviderSessionId,
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
@@ -59,11 +64,11 @@ import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 
 const layerTestDatabase = SqlitePersistence.layerMemory;
-const layerTestStores = Layer.merge(EventStore.layer, ProjectionStore.layer).pipe(
+const layerDefaultTestStores = Layer.merge(EventStore.layer, ProjectionStore.layer).pipe(
   Layer.provide(layerTestDatabase),
 );
-const layerTestEventSink = EventSink.layer.pipe(
-  Layer.provide(Layer.mergeAll(layerTestStores, layerTestDatabase)),
+const layerDefaultTestEventSink = EventSink.layer.pipe(
+  Layer.provide(Layer.mergeAll(layerDefaultTestStores, layerTestDatabase)),
 );
 const layerFailingReleaseEventSink = Layer.effect(
   EventSink.EventSinkV2,
@@ -81,7 +86,7 @@ const layerFailingReleaseEventSink = Layer.effect(
           : delegate.write(input),
     });
   }),
-).pipe(Layer.provide(layerTestEventSink));
+).pipe(Layer.provide(layerDefaultTestEventSink));
 
 interface FlakyReleaseWrites {
   /** Which release writes fail right now. */
@@ -127,7 +132,7 @@ const layerFlakyReleaseEventSink = (flaky: FlakyReleaseWrites) =>
           }),
       });
     }),
-  ).pipe(Layer.provide(layerTestEventSink));
+  ).pipe(Layer.provide(layerDefaultTestEventSink));
 
 // Once armed, holds the next attach write until the writer is interrupted.
 const layerPausingAttachEventSink = (pause: {
@@ -451,6 +456,7 @@ function makeProviderAdapter(
 }
 
 function layerTest(input: {
+  readonly database?: ReturnType<typeof SqlitePersistence.layerFromPath>;
   readonly state: Ref.Ref<TestProviderRuntimeState>;
   readonly idleTimeoutMs: number;
   readonly maxIdlePinMs?: number;
@@ -482,6 +488,15 @@ function layerTest(input: {
   readonly serverSettingsLayer?: ReturnType<typeof ServerSettings.layerTest>;
   readonly projectServiceLayer?: Layer.Layer<ProjectService.ProjectService>;
 }) {
+  const database = input.database ?? layerTestDatabase;
+  const layerTestStores =
+    input.database === undefined
+      ? layerDefaultTestStores
+      : Layer.merge(EventStore.layer, ProjectionStore.layer).pipe(Layer.provide(database));
+  const layerTestEventSink =
+    input.database === undefined
+      ? layerDefaultTestEventSink
+      : EventSink.layer.pipe(Layer.provide(Layer.mergeAll(layerTestStores, database)));
   const layerConfiguredEventSink =
     input.flakyReleaseWrites !== undefined
       ? layerFlakyReleaseEventSink(input.flakyReleaseWrites)
@@ -4676,4 +4691,452 @@ it.effect("releasing a job-capable runtime retires only its own running jobs", (
       assert.equal(jobs[1]?.job?.state, "running");
     }).pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 1000, stopJob: () => Effect.void })));
   }),
+);
+
+it.effect.each([
+  { laterTurn: false, outcome: "succeeded" },
+  { laterTurn: true, outcome: "succeeded" },
+  { laterTurn: false, outcome: "stopped" },
+  { laterTurn: true, outcome: "timed_out" },
+  { laterTurn: true, outcome: "lost" },
+  { laterTurn: false, outcome: "failed" },
+] as const)(
+  "persists job $outcome (later turn: $laterTurn) after the originating turn, including parent copies and database reload",
+  ({ laterTurn, outcome }) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "session-job-lifecycle-" });
+      const database = SqlitePersistence.layerFromPath(`${dir}/state.sqlite`);
+      const state = yield* Ref.make(emptyState);
+      const threadId = ThreadId.make("job-lifecycle-child");
+      const parentId = ThreadId.make("job-lifecycle-parent");
+      const itemId = TurnItemId.make("job-lifecycle-item");
+      const parentItemId = TurnItemId.make(`job:${itemId}`);
+      const originalRunId = RunId.make("job-origin-run");
+      yield* Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const events = yield* EventStore.EventStoreV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        const providerSessionId = yield* ids.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        const providerThread = makeProviderThread({
+          idAllocator: ids,
+          threadId,
+          providerSessionId,
+          now,
+        });
+        const taskId = NodeId.make("job-lifecycle-task");
+        const childCreated = yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now });
+        yield* sink.write({
+          events: [
+            yield* makeThreadCreatedEvent({ idAllocator: ids, threadId: parentId, now }),
+            {
+              ...childCreated,
+              payload: {
+                ...childCreated.payload,
+                lineage: {
+                  parentThreadId: parentId,
+                  relationshipToParent: "subagent",
+                  rootThreadId: parentId,
+                },
+                forkedFrom: { type: "node", nodeId: taskId },
+              },
+            },
+            {
+              id: yield* ids.allocate.event({ threadId: parentId }),
+              type: "subagent.updated",
+              threadId: parentId,
+              occurredAt: now,
+              payload: {
+                id: taskId,
+                threadId: parentId,
+                runId: null,
+                parentNodeId: NodeId.make("parent-root"),
+                origin: "app_owned",
+                createdBy: "agent",
+                driver: CODEX_DRIVER,
+                providerInstanceId: modelSelection.instanceId,
+                providerThreadId: null,
+                childThreadId: threadId,
+                nativeTaskRef: null,
+                prompt: "Build",
+                title: "Build task",
+                model: null,
+                status: "completed",
+                result: "done",
+                startedAt: now,
+                completedAt: now,
+                updatedAt: now,
+              },
+            },
+          ],
+        });
+        const runtime = yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const start = (ordinal: number) =>
+          Effect.gen(function* () {
+            const runId = ordinal === 1 ? originalRunId : RunId.make("job-later-run");
+            const run: OrchestrationV2Run = {
+              id: runId,
+              threadId,
+              ordinal,
+              providerInstanceId: modelSelection.instanceId,
+              modelSelection,
+              providerThreadId: providerThread.id,
+              userMessageId: MessageId.make(`message-${ordinal}`),
+              rootNodeId: null,
+              activeAttemptId: null,
+              status: "running",
+              requestedAt: now,
+              startedAt: now,
+              completedAt: null,
+              checkpointId: null,
+              contextHandoffId: null,
+            };
+            yield* sink.write({
+              events: [
+                {
+                  id: yield* ids.allocate.event({ threadId }),
+                  type: "run.updated",
+                  threadId,
+                  runId,
+                  occurredAt: now,
+                  payload: run,
+                },
+              ],
+            });
+            yield* runtime.startTurn({
+              appThread: (yield* projections.getThreadProjection(threadId)).thread,
+              threadId,
+              runId,
+              runOrdinal: ordinal,
+              providerTurnOrdinal: ordinal,
+              attemptId: ids.derive.runAttempt({ runId, attemptOrdinal: 1 }),
+              rootNodeId: ids.derive.rootNode({ runId }),
+              providerThread,
+              message: {
+                messageId: run.userMessageId,
+                text: "build",
+                attachments: [],
+                createdBy: "user",
+                creationSource: "web",
+              },
+              modelSelection,
+              runtimePolicy,
+            });
+            return run;
+          });
+        const origin = yield* start(1);
+        const subscription = yield* runtime.subscribeEvents!;
+        const queue = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId))!;
+        // The provider-session marker acknowledges that the pump processed every
+        // preceding snapshot. Unlike waiting for the desired job state, this
+        // barrier completes on the unfixed code too.
+        const flush = (updates: ReadonlyArray<ProviderAdapterV2Event>) =>
+          Effect.gen(function* () {
+            yield* Queue.offerAll(queue, [
+              ...updates,
+              {
+                type: "provider_session.updated",
+                driver: CODEX_DRIVER,
+                providerSession: runtime.providerSession,
+              },
+            ]);
+            return yield* subscription.events.pipe(
+              Stream.takeUntil((event) => event.type === "provider_session.updated"),
+              Stream.runCollect,
+            );
+          });
+        const running: Extract<OrchestrationV2TurnItem, { type: "system_notice" }> = {
+          id: itemId,
+          threadId,
+          runId: originalRunId,
+          nodeId: null,
+          providerThreadId: providerThread.id,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 0,
+          status: "running",
+          title: "Build",
+          startedAt: now,
+          completedAt: null,
+          updatedAt: now,
+          type: "system_notice",
+          message: "",
+          job: {
+            version: 1,
+            scope: "owning-runtime",
+            id: "1",
+            name: "Build",
+            command: "make",
+            cwd: "/tmp",
+            state: "running",
+            startedAt: DateTime.toEpochMillis(now),
+            endedAt: null,
+            exitCode: null,
+            signal: null,
+            output: "started",
+            providerSessionId,
+          },
+        };
+        // Reproduce a job already persisted by its originating run subscriber.
+        yield* sink.write({
+          events: [
+            {
+              id: yield* ids.allocate.event({ threadId }),
+              type: "turn-item.updated",
+              threadId,
+              runId: originalRunId,
+              occurredAt: now,
+              payload: running,
+            },
+          ],
+        });
+        yield* flush([
+          {
+            type: "turn.terminal",
+            driver: CODEX_DRIVER,
+            providerThreadId: providerThread.id,
+            providerTurnId: ids.derive.providerTurn({
+              driver: CODEX_DRIVER,
+              nativeTurnId: "origin-turn",
+            }),
+            runOrdinal: 1,
+            status: "completed",
+            failure: null,
+            threadDisposition: "reusable",
+          },
+        ]);
+        yield* sink.write({
+          events: [
+            {
+              id: yield* ids.allocate.event({ threadId }),
+              type: "run.updated",
+              threadId,
+              runId: originalRunId,
+              occurredAt: now,
+              payload: { ...origin, status: "completed", completedAt: now },
+            },
+          ],
+        });
+        yield* subscription.close;
+        const later = laterTurn ? yield* start(2) : undefined;
+        const observer = yield* runtime.subscribeEvents!;
+        const finished = {
+          ...running,
+          status: outcome === "failed" ? ("failed" as const) : ("completed" as const),
+          completedAt: now,
+          job: {
+            ...running.job!,
+            state: outcome,
+            endedAt: DateTime.toEpochMillis(now),
+            exitCode: outcome === "succeeded" ? 0 : outcome === "failed" ? 7 : null,
+            signal: outcome === "stopped" || outcome === "timed_out" ? "SIGTERM" : null,
+            output: `final ${outcome}`,
+          },
+        };
+        const afterSequence = yield* events.latestSequence();
+        yield* Queue.offerAll(queue, [
+          {
+            type: "turn_item.updated",
+            driver: CODEX_DRIVER,
+            turnItem: { ...running, job: { ...running.job!, state: "stopping" } },
+          },
+          { type: "turn_item.updated", driver: CODEX_DRIVER, turnItem: finished },
+          {
+            type: "provider_session.updated",
+            driver: CODEX_DRIVER,
+            providerSession: runtime.providerSession,
+          },
+        ]);
+        const delivered = yield* observer.events.pipe(
+          Stream.takeUntil((event) => event.type === "provider_session.updated"),
+          Stream.runCollect,
+        );
+        const saved = yield* projections.getTurnItem({ threadId, itemId });
+        assert.equal(saved?.type === "system_notice" && saved.job?.state, outcome);
+        assert.equal(saved?.runId, originalRunId);
+        assert.equal(saved?.type === "system_notice" && saved.job?.output, `final ${outcome}`);
+        const parent = yield* projections.getTurnItem({ threadId: parentId, itemId: parentItemId });
+        assert.equal(parent?.type === "system_notice" && parent.job?.state, outcome);
+        assert.equal(parent?.type === "system_notice" && parent.job?.sourceThreadId, threadId);
+        assert.deepEqual(
+          Array.from(delivered).map((event) => event.type),
+          ["provider_session.updated"],
+        );
+        const committed = yield* events
+          .read({ afterSequence, eventType: "turn-item.updated" })
+          .pipe(Stream.runCollect);
+        assert.lengthOf(Array.from(committed), 4); // two snapshots, one child and one parent copy each
+        if (later)
+          assert.equal(
+            (yield* projections.getThreadProjection(threadId)).runs.find(
+              (run) => run.id === later.id,
+            )?.status,
+            "running",
+          );
+        yield* observer.close;
+      }).pipe(
+        Effect.provide(
+          layerTest({ database, state, idleTimeoutMs: 60_000, stopJob: () => Effect.void }),
+        ),
+        Effect.scoped,
+      );
+      // Re-open the file with new SQL/store resources after the runtime and
+      // original connection close. Both the read projection and event history
+      // must retain the final snapshot, independent of in-process caches.
+      yield* Effect.gen(function* () {
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const events = yield* EventStore.EventStoreV2;
+        for (const [id, item] of [
+          [threadId, itemId],
+          [parentId, parentItemId],
+        ] as const) {
+          const reloaded = yield* projections.getThreadSnapshotWindow(id, { rowLimit: 1 });
+          const saved = reloaded.projection.turnItems.find((candidate) => candidate.id === item);
+          assert.equal(saved?.type === "system_notice" && saved.job?.state, outcome);
+          assert.equal(saved?.type === "system_notice" && saved.job?.output, `final ${outcome}`);
+          const history = Array.from(
+            yield* events
+              .read({ threadId: id, eventType: "turn-item.updated" })
+              .pipe(Stream.runCollect),
+          );
+          const final = history.at(-1)?.event;
+          assert.equal(
+            final?.type === "turn-item.updated" &&
+              final.payload.type === "system_notice" &&
+              final.payload.job?.state,
+            outcome,
+          );
+        }
+      }).pipe(
+        Effect.provide(
+          Layer.merge(EventStore.layer, ProjectionStore.layer).pipe(Layer.provide(database)),
+        ),
+        Effect.scoped,
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect.each(["other-session", "unattached", "detached", "wrong-driver", "forwarded"] as const)(
+  "does not persist a job snapshot from %s ownership",
+  (invalidOwner) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      yield* Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const events = yield* EventStore.EventStoreV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("job-owner");
+        const otherId = ThreadId.make("job-other-thread");
+        const providerSessionId = yield* ids.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        yield* sink.write({
+          events: [
+            yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now }),
+            yield* makeThreadCreatedEvent({ idAllocator: ids, threadId: otherId, now }),
+          ],
+        });
+        const runtime = yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        if (invalidOwner === "detached") {
+          yield* manager.open({
+            threadId: otherId,
+            providerSessionId,
+            modelSelection,
+            runtimePolicy,
+          });
+          yield* manager.detach({ providerSessionId, threadId });
+        }
+        const subscription = yield* runtime.subscribeEvents!;
+        const afterSequence = yield* events.latestSequence();
+        const queue = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId))!;
+        const target = invalidOwner === "unattached" ? otherId : threadId;
+        const itemId = TurnItemId.make("unowned-job");
+        yield* Queue.offerAll(queue, [
+          {
+            type: "turn_item.updated",
+            driver: invalidOwner === "wrong-driver" ? ProviderDriverKind.make("pi") : CODEX_DRIVER,
+            turnItem: {
+              id: itemId,
+              threadId: target,
+              runId: RunId.make("unowned-run"),
+              nodeId: null,
+              providerThreadId: null,
+              providerTurnId: null,
+              nativeItemRef: null,
+              parentItemId: null,
+              ordinal: 0,
+              status: "completed",
+              title: "Build",
+              startedAt: now,
+              completedAt: now,
+              updatedAt: now,
+              type: "system_notice",
+              message: "",
+              job: {
+                version: 1,
+                scope: "runtime",
+                id: "1",
+                name: "Build",
+                command: "make",
+                cwd: "/tmp",
+                state: "succeeded",
+                startedAt: DateTime.toEpochMillis(now),
+                endedAt: DateTime.toEpochMillis(now),
+                exitCode: 0,
+                signal: null,
+                output: "done",
+                providerSessionId:
+                  invalidOwner === "other-session"
+                    ? ProviderSessionId.make("another-runtime")
+                    : providerSessionId,
+                ...(invalidOwner === "forwarded" ? { sourceThreadId: otherId } : {}),
+              },
+            },
+          },
+          {
+            type: "provider_session.updated",
+            driver: CODEX_DRIVER,
+            providerSession: runtime.providerSession,
+          },
+        ]);
+        const delivered = yield* subscription.events.pipe(
+          Stream.takeUntil((event) => event.type === "provider_session.updated"),
+          Stream.runCollect,
+        );
+        assert.isNull(yield* projections.getTurnItem({ threadId: target, itemId }));
+        assert.deepEqual(
+          Array.from(
+            yield* events
+              .read({ afterSequence, eventType: "turn-item.updated" })
+              .pipe(Stream.runCollect),
+          ),
+          [],
+        );
+        assert.deepEqual(
+          Array.from(delivered).map((event) => event.type),
+          ["provider_session.updated"],
+        );
+      }).pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 60_000 })), Effect.scoped);
+    }),
 );
