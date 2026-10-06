@@ -1,4 +1,7 @@
+import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { useHeadsUpInbox } from "./HeadsUpInbox";
 import { StackActions, useNavigation } from "@react-navigation/native";
+import { Platform, View } from "react-native";
 import { useMemo } from "react";
 import { ScreenHeader } from "../../components/ScreenHeader";
 import { ScreenHeaderButton } from "../../components/ScreenHeaderButton";
@@ -9,6 +12,8 @@ import { useThreadHeaderOptions } from "./useThreadHeaderOptions";
 
 export function ThreadHeader(
   props: Parameters<typeof useThreadHeaderOptions>[0] & {
+    readonly environmentId: EnvironmentId;
+    readonly threadId: ThreadId;
     readonly hasThreadCwd: boolean;
     readonly hasWorkspaceRoot: boolean;
     readonly fileInspectorSupported: boolean;
@@ -21,7 +26,8 @@ export function ThreadHeader(
   const navigation = useNavigation();
   const { layout, panes, toggleAuxiliaryPane } = useAdaptiveWorkspaceLayout();
   const { onOpenTerminal, onMergeBack } = props.gitControls;
-  const native = useThreadHeaderOptions(props);
+  const inbox = useHeadsUpInbox(props.environmentId, props.threadId);
+  const native = useThreadHeaderOptions({ ...props, headsUpInboxButton: inbox.button });
   const androidHeaderActions = useMemo<ReadonlyArray<ScreenHeaderAction>>(() => {
     const actions: ScreenHeaderAction[] = [];
     if (props.onReturnToThread) {
@@ -81,9 +87,10 @@ export function ThreadHeader(
         subtitle={props.subtitle}
         sidebar={native.sidebar}
         options={native.options}
-        optionsVersion={native.optionsVersion}
-        trailing={
-          props.fileInspectorSupported && props.hasThreadCwd ? (
+        optionsVersion={[native.optionsVersion, inbox.revision]}
+        trailing={<View style={{ flexDirection: "row", alignItems: "center" }}>
+          {Platform.OS === "android" ? inbox.button : null}
+          {props.fileInspectorSupported && props.hasThreadCwd ? (
             <ScreenHeaderButton
               accessibilityLabel={
                 props.inspectorMode !== null && panes.auxiliaryPaneVisible
@@ -94,8 +101,8 @@ export function ThreadHeader(
               selected={props.inspectorMode !== null && panes.auxiliaryPaneVisible}
               onPress={props.onToggleInspector}
             />
-          ) : null
-        }
+          ) : null}
+        </View>}
         onBack={
           layout.usesSplitView
             ? undefined
@@ -111,6 +118,7 @@ export function ThreadHeader(
         hideBottomBorder
       />
       {native.fallback}
+      {inbox.modal}
     </>
   );
 }

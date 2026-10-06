@@ -1,5 +1,5 @@
 import { StackActions, useNavigation } from "@react-navigation/native";
-import { useMemo } from "react";
+import { useMemo, type ReactElement } from "react";
 import type { AppNativeStackNavigationOptions } from "../../native/StackHeader";
 import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
 import { withNativeGlassHeaderItem } from "../layout/native-glass-header-items";
@@ -12,6 +12,7 @@ import {
 type NativeHeaderItems = ReadonlyArray<Record<string, unknown>>;
 
 export function useThreadHeaderOptions(props: {
+  readonly headsUpInboxButton?: ReactElement;
   readonly title: string;
   readonly subtitle: string;
   readonly headerColor: string;
@@ -103,8 +104,18 @@ export function useThreadHeaderOptions(props: {
     // Search lives in the persistent sidebar, so the split header keeps
     // the git controls on the RIGHT (no center items — center space is
     // reserved for future breadcrumbs/status).
-    unstable_headerRightItems: () =>
-      layout.usesSplitView ? threadCenterHeaderItems : compactRightHeaderItems,
+    unstable_headerRightItems: () => [
+      ...(props.headsUpInboxButton
+        ? [
+            {
+              type: "custom",
+              identifier: "thread-heads-up-inbox",
+              element: props.headsUpInboxButton,
+            },
+          ]
+        : []),
+      ...(layout.usesSplitView ? threadCenterHeaderItems : compactRightHeaderItems),
+    ],
     unstable_headerSubtitle: props.usesNativeHeaderGlass ? props.subtitle : undefined,
     contentStyle: undefined,
   };

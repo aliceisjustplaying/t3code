@@ -335,8 +335,8 @@ function isLocalProjectedRow(
  * `run_interrupt_request` in `turnItems`. Keep every small request item from the
  * full projection even when it sits outside the recent visible window, so a
  * later history page that introduces the matching result still has the request
- * available for live attempt/run reducers. Unanswered heads-ups are composer
- * controls and must also survive outside the transcript window, including Undo.
+ * available for live attempt/run reducers. Heads-ups have their own durable
+ * environment query and do not expand the transcript window.
  * Jobs (including finished jobs and parent copies of child jobs) back the jobs
  * panel independently of transcript paging. Their schema-bounded output is
  * charged to the same control reserve; excess control state is reported rather
@@ -345,9 +345,7 @@ function isLocalProjectedRow(
 function isRetainedControlItem(item: OrchestrationV2TurnItem): boolean {
   return (
     item.type === "run_interrupt_request" ||
-    (item.type === "system_notice" &&
-      (item.job !== undefined ||
-        (item.headsUp !== undefined && item.headsUp.resolution === undefined)))
+    (item.type === "system_notice" && item.job !== undefined)
   );
 }
 

@@ -124,7 +124,7 @@ it.effect("resolving a heads-up persists, survives a small window, and can be un
       return item?.type === "system_notice" ? item.headsUp : undefined;
     });
 
-    // Bury the note under newer items: a small live window still carries it.
+    // Bury the note under newer items: a small chat window omits it, while durable inbox state remains.
     for (let index = 0; index < 5; index++) {
       yield* projections.apply({
         id: EventId.make(`filler-${index}`),
@@ -155,7 +155,19 @@ it.effect("resolving a heads-up persists, survives a small window, and can be un
       projections.getThreadSnapshotWindow(threadId, { rowLimit: 2 }),
       (snapshot) => snapshot.projection.turnItems.map((item) => item.id),
     );
-    assert.include(yield* windowIds, itemId);
+    assert.notInclude(yield* windowIds, itemId);
+
+    yield* orchestrator.dispatch({
+      type: "thread.heads-up.read",
+      commandId: CommandId.make("read-note"),
+      threadId,
+      turnItemId: itemId,
+    });
+    const readNote = yield* headsUpOf;
+    assert(readNote?.readAt !== undefined);
+    assert.equal(readNote.resolution, undefined);
+    assert.notInclude(yield* windowIds, itemId);
+    assert.equal((yield* outbox.listByCommandId(CommandId.make("read-note"))).length, 0);
 
     yield* orchestrator.dispatch({
       type: "thread.heads-up.resolve",
@@ -185,7 +197,8 @@ it.effect("resolving a heads-up persists, survives a small window, and can be un
       { type: "provider-heads-up.answer", providerThreadId, noteId: "n-1", resolution: null },
     ]);
     const restored = yield* headsUpOf;
-    assert.deepEqual(restored, {
+    assert.deepEqual(restored && { ...restored, readAt: undefined }, {
+      readAt: undefined,
       noteId: "n-1",
       tag: "Heads up",
       line: "Two suites are skipped on CI.",

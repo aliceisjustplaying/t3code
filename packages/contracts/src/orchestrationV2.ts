@@ -1317,11 +1317,12 @@ export type OrchestrationV2HeadsUpAction = typeof OrchestrationV2HeadsUpAction.T
 
 /**
  * A "you should know" note a provider surfaced as `[ysk:<id>] <tag> · <line>`.
- * Unresolved notes are pinned above the composer; `resolution` takes one out.
+ * Unresolved notes appear in the environment inbox; `resolution` reviews one.
  */
 export const OrchestrationV2HeadsUp = Schema.Struct({
   /** Original child thread for forwarded notes; feedback belongs to its provider session. */
   sourceThreadId: Schema.optional(ThreadId),
+  readAt: Schema.optional(IsoDateTime),
   noteId: Schema.String,
   tag: Schema.String,
   line: Schema.String,
@@ -1691,6 +1692,14 @@ const OrchestrationV2EventBase = Schema.Struct({
   occurredAt: Schema.DateTimeUtc,
 });
 
+const OrchestrationV2HeadsUpState = Schema.Struct({
+  sourceThreadId: ThreadId,
+  providerThreadId: Schema.NullOr(ProviderThreadId),
+  noteId: Schema.String,
+  readAt: Schema.optional(IsoDateTime),
+  resolution: Schema.optional(Schema.NullOr(OrchestrationV2HeadsUpAction)),
+});
+
 export const OrchestrationV2DomainEvent = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2EventBase.fields,
@@ -1787,6 +1796,11 @@ export const OrchestrationV2DomainEvent = Schema.Union([
     ...OrchestrationV2EventBase.fields,
     type: Schema.Literal("message.updated"),
     payload: OrchestrationV2ConversationMessage,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2EventBase.fields,
+    type: Schema.Literal("thread.heads-up.updated"),
+    payload: OrchestrationV2HeadsUpState,
   }),
   Schema.Struct({
     ...OrchestrationV2EventBase.fields,
@@ -2611,6 +2625,11 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
   }),
   Schema.Struct({
     ...OrchestrationV2JsonEventBaseFields,
+    type: Schema.Literal("thread.heads-up.updated"),
+    payload: OrchestrationV2HeadsUpState,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2JsonEventBaseFields,
     type: Schema.Literal("turn-item.updated"),
     payload: OrchestrationV2TurnItemJson,
   }),
@@ -3028,7 +3047,14 @@ export const OrchestrationV2Command = Schema.Union([
     threadId: ThreadId,
     turnItemId: TurnItemId,
   }),
-  /** Resolve a heads-up note; `null` puts it back above the composer. */
+  /** Opening a notice marks it read without resolving it. */
+  Schema.Struct({
+    type: Schema.Literal("thread.heads-up.read"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    turnItemId: TurnItemId,
+  }),
+  /** Resolve a heads-up note; `null` restores it to Unresolved. */
   Schema.Struct({
     type: Schema.Literal("thread.heads-up.resolve"),
     commandId: CommandId,
@@ -3207,6 +3233,8 @@ export const ORCHESTRATION_V2_WS_METHODS = {
   searchThreads: "orchestration.searchThreads",
   searchThread: "orchestration.searchThread",
   searchThreadStream: "orchestration.searchThreadStream",
+  getHeadsUpInbox: "orchestration.getHeadsUpInbox",
+  subscribeHeadsUpInbox: "orchestration.subscribeHeadsUpInbox",
   getArchivedShellSnapshot: "orchestration.getArchivedShellSnapshot",
   getThreadProjection: "orchestration.getThreadProjection",
   getWorkflowScript: "orchestration.getWorkflowScript",

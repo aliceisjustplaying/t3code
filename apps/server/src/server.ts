@@ -157,6 +157,7 @@ import * as CursorUsageReader from "./usage/cursorUsageReader.ts";
 import * as UsageService from "./usage/UsageService.ts";
 import * as RuntimeLayer from "./orchestration-v2/runtimeLayer.ts";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
+import * as HeadsUpInbox from "./orchestration-v2/HeadsUpInbox.ts";
 import * as ThreadSearch from "./orchestration-v2/ThreadSearch.ts";
 import * as ResourceCleanupService from "./orchestration-v2/ResourceCleanupService.ts";
 import * as ThreadSettlementService from "./orchestration-v2/ThreadSettlementService.ts";
@@ -565,7 +566,13 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   // Core Services
   Layer.provideMerge(layerOrchestrationApplication),
   Layer.provideMerge(RuntimeLayer.layerEventInfrastructure),
-  Layer.provideMerge(Layer.merge(ProjectStore.layer, ThreadSearch.layer)),
+  Layer.provideMerge(
+    Layer.mergeAll(
+      ProjectStore.layer,
+      ThreadSearch.layer,
+      HeadsUpInbox.layer.pipe(Layer.provide(RuntimeLayer.layerEventInfrastructure)),
+    ),
+  ),
   Layer.provideMerge(layerServerSettings),
   // The asset route uses the registry's GitHub credential for private PR media.
   Layer.provideMerge(layerSourceControlProviderRegistry),

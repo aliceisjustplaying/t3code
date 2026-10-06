@@ -394,6 +394,10 @@
     "./jobs": {
       "types": "./src/jobs.ts",
       "default": "./src/jobs.ts"
+    },
+    "./state/heads-up-inbox": {
+      "types": "./src/state/headsUpInbox.ts",
+      "default": "./src/state/headsUpInbox.ts"
     }
   },
   "scripts": {

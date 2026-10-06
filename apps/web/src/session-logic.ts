@@ -642,7 +642,7 @@ export function deriveTimelineEntriesFromVisibleTurnItems(
     // Task progress belongs in the composer, not between conversation entries.
     if (item.type === "todo_list" || item.type === "checkpoint") continue;
     if (item.type === "user_message" && foldedAnswerMessageIds.has(item.messageId)) continue;
-    // An open heads-up lives in the composer band; it joins the timeline once answered.
+    // An open heads-up lives in the environment inbox; it joins the timeline once reviewed.
     if (item.type === "system_notice" && item.job) continue;
     if (item.type === "system_notice" && item.headsUp && item.headsUp.resolution === undefined) {
       continue;

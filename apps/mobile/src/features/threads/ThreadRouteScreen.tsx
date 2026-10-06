@@ -1070,6 +1070,9 @@ function ThreadRouteContent(
     <>
       {activeInspectorRenderer ? <InspectorPaneRoleActivation /> : null}
       <ThreadHeader
+        key={selectedThread.environmentId}
+        environmentId={selectedThread.environmentId}
+        threadId={selectedThread.id}
         title={selectedThread.title}
         subtitle={headerSubtitle}
         headerColor={headerColor}

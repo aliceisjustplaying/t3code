@@ -206,7 +206,7 @@ export interface DismissThreadUserInputInput extends ThreadCommandInput {
 
 export interface ResolveThreadHeadsUpInput extends ThreadCommandInput {
   readonly turnItemId: TurnItemId;
-  /** `null` puts the note back above the composer. */
+  /** `null` restores the note to the unresolved inbox. */
   readonly resolution: OrchestrationV2HeadsUpAction | null;
 }
 
@@ -882,6 +882,17 @@ export const stopThreadJob = Effect.fn("EnvironmentCommands.stopThreadJob")(func
 ) {
   return yield* dispatch({
     type: "thread.job.stop",
+    commandId: yield* allocateCommandId(input),
+    threadId: input.threadId,
+    turnItemId: input.turnItemId,
+  });
+});
+
+export const readThreadHeadsUp = Effect.fn("EnvironmentCommands.readThreadHeadsUp")(function* (
+  input: ThreadCommandInput & { readonly turnItemId: TurnItemId },
+) {
+  return yield* dispatch({
+    type: "thread.heads-up.read",
     commandId: yield* allocateCommandId(input),
     threadId: input.threadId,
     turnItemId: input.turnItemId,

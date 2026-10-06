@@ -54,6 +54,7 @@ import {
   OrchestrationV2RuntimeRequestJson as OrchestrationV2RuntimeRequestJsonSchema,
   OrchestrationV2SubagentJson as OrchestrationV2SubagentJsonSchema,
   OrchestrationV2TurnItemJson as OrchestrationV2TurnItemJsonSchema,
+  OrchestrationV2HeadsUpAction,
   orchestrationV2RunWorkStartedAt,
   RunId,
   MessageId,
@@ -79,6 +80,8 @@ import * as SqlClient from "effect/sql/SqlClient";
 import type * as Statement from "effect/sql/Statement";
 
 import { MCP_APP_OUTPUT_KEY } from "@t3tools/shared/mcpApp";
+import { withHeadsUp } from "./HeadsUpNotice.ts";
+
 import { threadHtmlRenderAttachmentIds } from "../attachmentStore.ts";
 import {
   isThreadHistoryUserTurn,
@@ -809,6 +812,31 @@ export function applyToProjection(
         ...base,
         messages: upsertById(base.messages, event.payload),
       };
+    case "thread.heads-up.updated":
+      return {
+        ...base,
+        turnItems: base.turnItems.map((item) => {
+          if (
+            item.type !== "system_notice" ||
+            item.headsUp === undefined ||
+            (item.headsUp.sourceThreadId ?? item.threadId) !== event.payload.sourceThreadId ||
+            item.providerThreadId !== event.payload.providerThreadId ||
+            item.headsUp.noteId !== event.payload.noteId
+          )
+            return item;
+          const { resolution: previous, ...note } = item.headsUp;
+          const resolution =
+            event.payload.resolution === undefined ? previous : event.payload.resolution;
+          return {
+            ...item,
+            headsUp: {
+              ...note,
+              ...(event.payload.readAt === undefined ? {} : { readAt: event.payload.readAt }),
+              ...(resolution == null ? {} : { resolution }),
+            },
+          };
+        }),
+      };
     case "turn-item.updated":
       return withLocalVisibleTurnItems({
         ...base,
@@ -892,6 +920,14 @@ function applyToProjectionReplayState(
   state.projections.set(event.threadId, next);
 
   switch (event.type) {
+    case "thread.heads-up.updated": {
+      for (const [threadId, projection] of state.projections) {
+        if (threadId !== event.threadId) {
+          state.projections.set(threadId, applyToProjection(projection, event));
+        }
+      }
+      break;
+    }
     case "provider-session.attached": {
       const boundThreadIds = new Set(state.providerSessionThreadIds.get(event.payload.id) ?? []);
       boundThreadIds.add(event.threadId);
@@ -2404,8 +2440,55 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             `;
             break;
           }
+          case "thread.heads-up.updated": {
+            // Patch only inbox state, not a stale complete turn item. A read on
+            // another device must never race a Dismiss/Undo into losing its answer.
+            let payload = sql`payload_json`;
+            if (event.payload.readAt !== undefined)
+              payload = sql`json_set(${payload}, '$.headsUp.readAt', ${event.payload.readAt})`;
+            if (event.payload.resolution !== undefined)
+              payload =
+                event.payload.resolution === null
+                  ? sql`json_remove(${payload}, '$.headsUp.resolution')`
+                  : sql`json_set(${payload}, '$.headsUp.resolution', ${event.payload.resolution})`;
+            yield* sql`UPDATE orchestration_v2_projection_turn_items SET payload_json = ${payload}
+              WHERE type = 'system_notice'
+                AND json_extract(payload_json, '$.headsUp.noteId') = ${event.payload.noteId}
+                AND COALESCE(json_extract(payload_json, '$.headsUp.sourceThreadId'), thread_id) = ${event.payload.sourceThreadId}
+                AND provider_thread_id IS ${event.payload.providerThreadId}`;
+            break;
+          }
           case "turn-item.updated": {
-            const payloadJson = yield* encodeTurnItemPayload(event.payload);
+            let item = withHeadsUp(event.payload);
+            if (item.type === "system_notice" && item.headsUp !== undefined) {
+              const state = yield* sql<{ readAt: string | null; resolution: string | null }>`
+                SELECT MAX(json_extract(payload_json, '$.headsUp.readAt')) AS "readAt",
+                  MAX(json_extract(payload_json, '$.headsUp.resolution')) AS resolution
+                FROM orchestration_v2_projection_turn_items
+                WHERE type = 'system_notice'
+                  AND json_extract(payload_json, '$.headsUp.noteId') = ${item.headsUp.noteId}
+                  AND COALESCE(json_extract(payload_json, '$.headsUp.sourceThreadId'), thread_id) = ${item.headsUp.sourceThreadId ?? item.threadId}
+                  AND provider_thread_id IS ${item.providerThreadId}
+              `;
+              // Providers can repeat a note with a new item id on reconnect.
+              // Its source identity retains the user's read/review state.
+              const prior = state[0];
+              const resolution =
+                prior?.resolution == null
+                  ? undefined
+                  : yield* Schema.decodeUnknownEffect(OrchestrationV2HeadsUpAction)(
+                      prior.resolution,
+                    );
+              item = {
+                ...item,
+                headsUp: {
+                  ...item.headsUp,
+                  ...(prior?.readAt == null ? {} : { readAt: prior.readAt }),
+                  ...(resolution === undefined ? {} : { resolution }),
+                },
+              };
+            }
+            const payloadJson = yield* encodeTurnItemPayload(item);
             const payload = parseEncodedPayload(payloadJson);
             yield* sql`
               INSERT INTO orchestration_v2_projection_turn_items (
@@ -2831,22 +2914,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     )
                     AND request.type = 'run_interrupt_request'
                   UNION
-                  SELECT job.payload_json, job.ordinal, job.turn_item_id
+                  SELECT job.ordinal, job.turn_item_id
                   FROM orchestration_v2_projection_turn_items AS job
                   WHERE job.thread_id = ${threadId}
                     AND ${window.anchorItemId ?? null} IS NULL
                     AND job.type = 'system_notice'
                     AND json_extract(job.payload_json, '$.job.id') IS NOT NULL
-                  UNION
-                  -- Unanswered heads-up notes stay loaded however old, so the band
-                  -- above the composer shows each one until the user acts on it.
-                  SELECT note.ordinal, note.turn_item_id
-                  FROM orchestration_v2_projection_turn_items AS note
-                  WHERE note.thread_id = ${threadId}
-                    AND ${window.anchorItemId ?? null} IS NULL
-                    AND note.type = 'system_notice'
-                    AND json_extract('$.headsUp.noteId') IS NOT NULL
-                    AND json_extract('$.headsUp.resolution') IS NULL
                   UNION
                   SELECT latest.ordinal, latest.turn_item_id
                   FROM (

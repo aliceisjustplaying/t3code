@@ -469,6 +469,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "runtime-request.respond":
     case "thread.user-input.dismiss":
     case "thread.job.stop":
+    case "thread.heads-up.read":
     case "thread.heads-up.resolve":
     case "checkpoint.rollback":
     case "checkpoint.rollback.fail":
@@ -7343,15 +7344,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     });
 
   const dispatchThreadHeadsUpResolve = (
-    command: Extract<OrchestrationV2Command, { readonly type: "thread.heads-up.resolve" }>,
+    command: Extract<
+      OrchestrationV2Command,
+      { readonly type: "thread.heads-up.resolve" | "thread.heads-up.read" }
+    >,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
     effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
   ) =>
     Effect.gen(function* () {
-      const projection = yield* loadProjectionForCommand(command, ["turnItems"], {
-        turnItemTypes: ["system_notice"],
-      });
-      const item = projection.turnItems.find((candidate) => candidate.id === command.turnItemId);
+      const item = yield* projectionStore
+        .getTurnItem({ threadId: command.threadId, itemId: command.turnItemId })
+        .pipe(
+          Effect.mapError(() => new OrchestratorProjectionError({ threadId: command.threadId })),
+        );
       if (item?.type !== "system_notice" || item.headsUp === undefined) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
@@ -7359,40 +7364,41 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: "This heads-up no longer exists.",
         });
       }
-      const { resolution: _previous, ...headsUp } = item.headsUp;
       const now = yield* DateTime.now;
+      const sourceThreadId = item.headsUp.sourceThreadId ?? item.threadId;
       yield* emit(
         events,
         command,
       )({
-        type: "turn-item.updated",
+        type: "thread.heads-up.updated",
         threadId: command.threadId,
-        ...(item.runId === null ? {} : { runId: item.runId }),
-        ...(item.nodeId === null ? {} : { nodeId: item.nodeId }),
         occurredAt: now,
         payload: {
-          ...item,
-          headsUp:
-            command.resolution === null ? headsUp : { ...headsUp, resolution: command.resolution },
-          updatedAt: now,
+          sourceThreadId,
+          providerThreadId: item.providerThreadId,
+          noteId: item.headsUp.noteId,
+          readAt: DateTime.formatIso(now),
+          ...(command.type === "thread.heads-up.read" ? {} : { resolution: command.resolution }),
         },
       });
-      // Undo must reach the source too, so it can forget a previous Knew answer.
-      const { resolution } = command;
-      const { providerThreadId } = item;
-      if (providerThreadId === null) return;
-      const answer: PendingOrchestrationEffectV2 = {
-        id: `effect:${command.commandId}:provider-heads-up.answer`,
-        commandId: command.commandId,
-        threadId: headsUp.sourceThreadId ?? command.threadId,
-        request: {
-          type: "provider-heads-up.answer",
-          providerThreadId,
-          noteId: headsUp.noteId,
-          resolution,
-        },
-      };
-      yield* Ref.update(effects, (existing) => [...existing, answer]);
+      // Only resolution/Undo sends extension feedback, always to the owning session.
+      const providerThreadId = item.providerThreadId;
+      const noteId = item.headsUp.noteId;
+      if (command.type === "thread.heads-up.read" || providerThreadId === null) return;
+      yield* Ref.update(effects, (existing) => [
+        ...existing,
+        {
+          id: `effect:${command.commandId}:provider-heads-up.answer`,
+          commandId: command.commandId,
+          threadId: sourceThreadId,
+          request: {
+            type: "provider-heads-up.answer",
+            providerThreadId,
+            noteId,
+            resolution: command.resolution,
+          },
+        } satisfies PendingOrchestrationEffectV2,
+      ]);
     });
 
   const dispatchThreadUserInputDismiss = (
@@ -10398,6 +10404,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "thread.job.stop":
         yield* dispatchThreadJobStop(command, events, effects);
         break;
+      case "thread.heads-up.read":
       case "thread.heads-up.resolve":
         yield* dispatchThreadHeadsUpResolve(command, events, effects);
         break;

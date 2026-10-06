@@ -37,6 +37,7 @@ import {
   WorkspaceBreadcrumbText,
 } from "../WorkspaceBreadcrumb";
 import { cn } from "~/lib/utils";
+import { HeadsUpInbox } from "./HeadsUpInbox";
 
 interface ChatHeaderProps {
   activeThreadEnvironmentId: EnvironmentId;
@@ -355,6 +356,11 @@ export const ChatHeader = memo(function ChatHeader({
           )}
         </WorkspaceBreadcrumbItem>
       </WorkspaceBreadcrumb>
+      <HeadsUpInbox
+        key={activeThreadEnvironmentId}
+        environmentId={activeThreadEnvironmentId}
+        threadId={activeThreadId}
+      />
     </div>
   );
 });
