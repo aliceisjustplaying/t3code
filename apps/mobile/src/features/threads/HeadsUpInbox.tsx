@@ -244,6 +244,7 @@ function InboxPages({
         key={`${view}:${cursor ?? ""}`}
         className="flex-1"
         contentContainerClassName="pb-4"
+        accessibilityState={{ busy: page.isPending }}
       >
         {!connected ? (
           <Text accessibilityLiveRegion="polite" className="p-4 text-sm text-foreground-muted">
@@ -265,12 +266,13 @@ function InboxPages({
             />
           </View>
         ) : null}
-        {page.isPending || (!page.data && !loadError) ? (
+        {/* Read acknowledgments revalidate this page; keep loaded rows in place. */}
+        {!page.data && !loadError ? (
           <Text accessibilityLiveRegion="polite" className="p-4 text-sm text-foreground-muted">
-            {page.data ? "Refreshing notices…" : "Loading notices…"}
+            Loading notices…
           </Text>
         ) : null}
-        {connected && !loadError && !page.isPending && page.data?.items.length === 0 ? (
+        {connected && !loadError && page.data?.items.length === 0 ? (
           <Text className="p-6 text-sm text-foreground-muted">
             {cursor
               ? "No notices on this page."
@@ -297,17 +299,69 @@ function InboxPages({
                 </Text>
               </View>
               <Text className="text-sm font-t3-bold text-foreground">{entry.note.line}</Text>
-              <Text className="text-xs text-foreground-muted">From {entry.sourceThreadTitle}</Text>
-              {entry.note.resolution ? (
+            </Pressable>
+            <View className="flex-row flex-wrap items-center gap-3 px-4 pb-2">
+              <View className="min-w-0 flex-1">
                 <Text className="text-xs text-foreground-muted">
-                  {entry.note.resolution === "knew"
-                    ? "Knew"
-                    : entry.note.resolution === "dismiss"
-                      ? "Dismissed"
-                      : "Reviewed"}
+                  From {entry.sourceThreadTitle}
+                </Text>
+                {entry.note.resolution ? (
+                  <Text className="text-xs text-foreground-muted">
+                    {entry.note.resolution === "knew"
+                      ? "Knew"
+                      : entry.note.resolution === "dismiss"
+                        ? "Dismissed"
+                        : "Reviewed"}
+                  </Text>
+                ) : null}
+              </View>
+              <View className="flex-row gap-2">
+                {view === "reviewed" ? (
+                  <RequestActionButton
+                    label={
+                      entry.note.resolution === "dismiss" || entry.note.resolution === "knew"
+                        ? "Undo"
+                        : "Restore"
+                    }
+                    accessibilityLabel={`${entry.note.resolution === "dismiss" || entry.note.resolution === "knew" ? "Undo" : "Restore"} · Restore to unresolved: ${entry.note.line}`}
+                    tone="secondary"
+                    disabled={!connected || busy !== null}
+                    onPress={(event) => {
+                      event.stopPropagation();
+                      void act(entry, null);
+                    }}
+                  />
+                ) : (
+                  <>
+                    <RequestActionButton
+                      label="Dismiss"
+                      tone="secondary"
+                      disabled={!connected || busy !== null}
+                      accessibilityLabel={`Dismiss: ${entry.note.line}`}
+                      onPress={(event) => {
+                        event.stopPropagation();
+                        void act(entry, "dismiss");
+                      }}
+                    />
+                    <RequestActionButton
+                      label="Knew"
+                      tone="secondary"
+                      disabled={!connected || busy !== null}
+                      accessibilityLabel={`Knew: ${entry.note.line}`}
+                      onPress={(event) => {
+                        event.stopPropagation();
+                        void act(entry, "knew");
+                      }}
+                    />
+                  </>
+                )}
+              </View>
+              {busy === entry.id ? (
+                <Text accessibilityLiveRegion="polite" className="text-xs text-foreground-muted">
+                  Saving…
                 </Text>
               ) : null}
-            </Pressable>
+            </View>
             {expanded === entry.id ? (
               <View className="gap-3 bg-subtle px-4 py-4">
                 <Text selectable className="text-sm text-foreground">
@@ -329,29 +383,6 @@ function InboxPages({
                   </>
                 ) : null}
                 <View className="flex-row flex-wrap gap-2">
-                  {view === "reviewed" ? (
-                    <RequestActionButton
-                      label="Undo · Restore to unresolved"
-                      tone="secondary"
-                      disabled={!connected || busy !== null}
-                      onPress={() => void act(entry, null)}
-                    />
-                  ) : (
-                    <>
-                      <RequestActionButton
-                        label="Dismiss"
-                        tone="secondary"
-                        disabled={!connected || busy !== null}
-                        onPress={() => void act(entry, "dismiss")}
-                      />
-                      <RequestActionButton
-                        label="Knew"
-                        tone="secondary"
-                        disabled={!connected || busy !== null}
-                        onPress={() => void act(entry, "knew")}
-                      />
-                    </>
-                  )}
                   <RequestActionButton
                     label="Ask agent · Draft"
                     disabled={!connected || busy !== null}
@@ -362,11 +393,6 @@ function InboxPages({
                   Ask agent appends to the target thread’s unsent draft. Nothing is sent or
                   resolved.
                 </Text>
-                {busy === entry.id ? (
-                  <Text accessibilityLiveRegion="polite" className="text-sm text-foreground-muted">
-                    Saving…
-                  </Text>
-                ) : null}
               </View>
             ) : null}
           </View>
