@@ -225,7 +225,11 @@ function InboxPages({
           </button>
         ))}
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto" key={`${view}:${cursor ?? ""}`}>
+      <div
+        className="min-h-0 flex-1 overflow-y-auto"
+        key={`${view}:${cursor ?? ""}`}
+        aria-busy={page.isPending}
+      >
         {!connected ? (
           <p role="status" className="p-4 text-sm text-muted-foreground">
             Disconnected. Reconnect to refresh or update notices.
@@ -246,12 +250,13 @@ function InboxPages({
             </Button>
           </div>
         ) : null}
-        {page.isPending || (!page.data && !loadError) ? (
+        {/* Read acknowledgments revalidate this page; keep loaded rows in place. */}
+        {!page.data && !loadError ? (
           <p role="status" className="p-4 text-sm text-muted-foreground">
-            {page.data ? "Refreshing notices…" : "Loading notices…"}
+            Loading notices…
           </p>
         ) : null}
-        {connected && !loadError && !page.isPending && page.data?.items.length === 0 ? (
+        {connected && !loadError && page.data?.items.length === 0 ? (
           <p className="p-6 text-sm text-muted-foreground">
             {cursor
               ? "No notices on this page."
@@ -277,19 +282,73 @@ function InboxPages({
                 <time dateTime={entry.createdAt}>{new Date(entry.createdAt).toLocaleString()}</time>
               </span>
               <span className="mt-1 block text-sm font-medium">{entry.note.line}</span>
-              <span className="mt-1 block text-xs text-muted-foreground">
-                From {entry.sourceThreadTitle}
-              </span>
-              {entry.note.resolution ? (
-                <span className="block text-xs text-muted-foreground">
-                  {entry.note.resolution === "knew"
-                    ? "Knew"
-                    : entry.note.resolution === "dismiss"
-                      ? "Dismissed"
-                      : "Reviewed"}
-                </span>
-              ) : null}
             </button>
+            <div className="flex flex-wrap items-center gap-x-3 px-4 pb-2">
+              <div className="min-w-0 flex-1 break-words">
+                <span className="block text-xs text-muted-foreground">
+                  From {entry.sourceThreadTitle}
+                </span>
+                {entry.note.resolution ? (
+                  <span className="block text-xs text-muted-foreground">
+                    {entry.note.resolution === "knew"
+                      ? "Knew"
+                      : entry.note.resolution === "dismiss"
+                        ? "Dismissed"
+                        : "Reviewed"}
+                  </span>
+                ) : null}
+              </div>
+              <div className="flex min-h-11 items-center gap-3" aria-busy={busy === entry.id}>
+                {view === "reviewed" ? (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={!connected || busy !== null}
+                    aria-label={`${entry.note.resolution === "dismiss" || entry.note.resolution === "knew" ? "Undo" : "Restore"} · Restore to unresolved: ${entry.note.line}`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void act(entry, null);
+                    }}
+                  >
+                    {entry.note.resolution === "dismiss" || entry.note.resolution === "knew"
+                      ? "Undo"
+                      : "Restore"}
+                  </Button>
+                ) : (
+                  <>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={!connected || busy !== null}
+                      aria-label={`Dismiss: ${entry.note.line}`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void act(entry, "dismiss");
+                      }}
+                    >
+                      Dismiss
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={!connected || busy !== null}
+                      aria-label={`Knew: ${entry.note.line}`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void act(entry, "knew");
+                      }}
+                    >
+                      Knew
+                    </Button>
+                  </>
+                )}
+              </div>
+              {busy === entry.id ? (
+                <p role="status" className="text-xs">
+                  Saving…
+                </p>
+              ) : null}
+            </div>
             {expanded === entry.id ? (
               <div id={`ysk-${entry.id}`} className="space-y-3 bg-muted/20 p-4 text-sm">
                 {entry.note.explanation ? (
@@ -315,35 +374,6 @@ function InboxPages({
                   </>
                 ) : null}
                 <div className="flex flex-wrap gap-2">
-                  {view === "reviewed" ? (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={!connected || busy !== null}
-                      onClick={() => void act(entry, null)}
-                    >
-                      Undo · Restore to unresolved
-                    </Button>
-                  ) : (
-                    <>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        disabled={!connected || busy !== null}
-                        onClick={() => void act(entry, "dismiss")}
-                      >
-                        Dismiss
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        disabled={!connected || busy !== null}
-                        onClick={() => void act(entry, "knew")}
-                      >
-                        Knew
-                      </Button>
-                    </>
-                  )}
                   <Button
                     size="sm"
                     disabled={!connected || busy !== null}
@@ -356,7 +386,6 @@ function InboxPages({
                   Ask agent appends to the target thread’s unsent draft. Nothing is sent or
                   resolved.
                 </p>
-                {busy === entry.id ? <p role="status">Saving…</p> : null}
               </div>
             ) : null}
           </section>

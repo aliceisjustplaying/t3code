@@ -12,12 +12,17 @@ import { AsyncResult } from "effect/reactivity";
 
 const ui = vi.hoisted(() => ({
   presses: new Map<string, () => void>(),
+  actions: new Map<
+    string,
+    { press: (event: { stopPropagation: () => void }) => void; disabled: boolean }
+  >(),
+  view: "unresolved",
   ask: null as null | (() => void),
   askDisabled: false,
   visible: false,
   errors: [] as ReactNode[],
   navigate: vi.fn(),
-  command: vi.fn(async () => ({ _tag: "Success" })),
+  command: vi.fn(async (_input: unknown) => ({ _tag: "Success" })),
 }));
 const storage = vi.hoisted(() => ({
   document: "",
@@ -64,14 +69,33 @@ vi.mock("@effect/atom-react", () => ({
 vi.mock("@react-navigation/native", () => ({ useNavigation: () => ({ navigate: ui.navigate }) }));
 vi.mock("../../connection/catalog", () => ({ environmentCatalog: { stateAtom: () => null } }));
 vi.mock("../../state/headsUpInbox", () => ({
-  headsUpInbox: { summary: () => "summary", page: () => "page", read: "read", resolve: "resolve" },
+  headsUpInbox: {
+    summary: () => "summary",
+    page: ({ input }: { input: { view: string } }) => {
+      ui.view = input.view;
+      return "page";
+    },
+    read: "read",
+    resolve: "resolve",
+  },
 }));
 vi.mock("../../state/use-atom-command", () => ({ useAtomCommand: () => ui.command }));
 vi.mock("../../state/query", () => ({
   useEnvironmentQuery: (query: string) => ({
     data:
       query === "page"
-        ? { items: [entry], nextCursor: null }
+        ? {
+            items: [
+              {
+                ...entry,
+                note: {
+                  ...entry.note,
+                  ...(ui.view === "reviewed" ? { resolution: "dismiss" } : {}),
+                },
+              },
+            ],
+            nextCursor: null,
+          }
         : { unreadCount: 0, unresolvedCount: 1, reviewedCount: 0 },
     isPending: false,
     error: null,
@@ -126,11 +150,12 @@ vi.mock("./RequestActionButton", () => ({
     disabled,
   }: {
     label: string;
-    onPress: () => void;
+    onPress: (event: { stopPropagation: () => void }) => void;
     disabled: boolean;
   }) => {
+    ui.actions.set(label, { press: onPress, disabled });
     if (label === "Ask agent · Draft") {
-      ui.ask = onPress;
+      ui.ask = () => onPress({ stopPropagation() {} });
       ui.askDisabled = disabled;
     }
     return null;
@@ -219,10 +244,11 @@ beforeEach(() => {
   storage.barrier = Promise.resolve();
   storage.error = null;
   ui.presses.clear();
+  ui.actions.clear();
   ui.ask = null;
   ui.errors = [];
   ui.navigate.mockClear();
-  ui.command.mockClear();
+  ui.command.mockReset().mockResolvedValue({ _tag: "Success" });
   const document = { nodeType: 9, addEventListener() {}, removeEventListener() {} };
   const container = {
     nodeType: 1,
@@ -295,4 +321,46 @@ it("Ask preserves edits after hydration and keeps the inbox open when hydration 
   } finally {
     warning.mockRestore();
   }
+});
+
+it.each(["dismiss", "knew"] as const)(
+  "%s can be saved from a collapsed native row and blocks other actions while saving",
+  async (resolution) => {
+    await act(async () => root.render(createElement(Probe)));
+    await act(async () => ui.presses.get("You should know, 0 unread")!());
+    const saving = Promise.withResolvers<{ _tag: string }>();
+    ui.command.mockReturnValueOnce(saving.promise);
+    const stopPropagation = vi.fn();
+    await act(async () =>
+      ui.actions.get(resolution === "dismiss" ? "Dismiss" : "Knew")!.press({ stopPropagation }),
+    );
+    expect(ui.command).toHaveBeenCalledWith({
+      environmentId,
+      input: { threadId: entry.threadId, turnItemId: entry.turnItemId, resolution },
+    });
+    expect(ui.actions.get("Dismiss")!.disabled).toBe(true);
+    expect(ui.actions.get("Knew")!.disabled).toBe(true);
+    expect(ui.ask).toBeNull();
+    expect(stopPropagation).toHaveBeenCalledTimes(1);
+    await act(async () => saving.resolve({ _tag: "Success" }));
+    expect(ui.actions.get("Dismiss")!.disabled).toBe(false);
+    expect(ui.navigate).not.toHaveBeenCalled();
+  },
+);
+
+it("native Reviewed restores without expansion and exposes failed updates for retry", async () => {
+  await act(async () => root.render(createElement(Probe)));
+  await act(async () => ui.presses.get("You should know, 0 unread")!());
+  await act(async () => ui.presses.get("tab")!());
+  ui.command.mockResolvedValueOnce({ _tag: "Failure" });
+  await act(async () => ui.actions.get("Undo")!.press({ stopPropagation() {} }));
+  expect(ui.errors).toContain("The notice could not be updated. Try again.");
+  expect(ui.actions.get("Undo")!.disabled).toBe(false);
+  await act(async () => ui.actions.get("Undo")!.press({ stopPropagation() {} }));
+  expect(ui.command).toHaveBeenLastCalledWith({
+    environmentId,
+    input: { threadId: entry.threadId, turnItemId: entry.turnItemId, resolution: null },
+  });
+  expect(ui.ask).toBeNull();
+  expect(ui.navigate).not.toHaveBeenCalled();
 });
