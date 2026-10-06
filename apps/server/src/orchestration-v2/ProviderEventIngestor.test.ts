@@ -1621,5 +1621,5 @@ it.effect("copies app-owned child heads-ups once to their owner without waking a
       ),
       2,
     );
-  }).pipe(Effect.provide(TestLayer)),
+  }).pipe(Effect.provide(layerTest)),
 );
