@@ -653,7 +653,7 @@ describe("PiAdapterV2", () => {
           terminal.status === "failed" &&
           terminal.failure.message === "Agent is already processing.",
       );
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect(
@@ -733,7 +733,7 @@ describe("PiAdapterV2", () => {
         // Settling on the stale idle answer would end the turn before its reply.
         assert.include(replies, "Hello back.");
         assert.equal(yield* Queue.size(offers), 0);
-      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("delivers extension notices between turns without starting a run", () =>
@@ -759,7 +759,7 @@ describe("PiAdapterV2", () => {
       assert.isNull(event.turnItem.providerTurnId);
       assert.equal(event.turnItem.title, "[ysk:idle] Heads up · A child finished.");
       assert.isFalse(fake.allRequests().some((r) => r["type"] === "prompt"));
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect(
@@ -853,7 +853,7 @@ describe("PiAdapterV2", () => {
         yield* fake.emit({ type: "extension_ui_request", method: "notify", message: "fence" });
         const next = yield* takeEvent((event) => event.type === "turn_item.updated");
         assert.isTrue(next.type === "turn_item.updated" && next.turnItem.title === "fence");
-      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("pins idle sessions while extension work remains and releases when it ends", () =>
@@ -872,7 +872,7 @@ describe("PiAdapterV2", () => {
         });
         assert.equal(yield* Fiber.join(probe), pending);
       }
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("gives notify and extension-error items distinct ids in each thread", () =>
@@ -925,7 +925,7 @@ describe("PiAdapterV2", () => {
         }
       }
       assert.equal(new Set(itemIds).size, 4);
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("injects the T3 MCP extension and bearer when a session exists", () =>
@@ -2204,7 +2204,7 @@ describe("PiAdapterV2", () => {
       yield* answer({ providerThread, noteId: "k3x9", resolution: "dismiss" });
 
       assert.deepEqual(sent(), ["get_commands", "get_commands", "/ysk answer k3x9 dismiss"]);
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("keeps snapshot message identities distinct across native sessions", () =>
@@ -2322,7 +2322,7 @@ describe("PiAdapterV2", () => {
       yield* fake.emit({ type: "agent_settled" });
       const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
       assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("shows compaction progress and completes the same activity row", () =>
