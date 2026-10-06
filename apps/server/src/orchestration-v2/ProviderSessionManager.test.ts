@@ -4674,8 +4674,6 @@ it.effect("releasing a job-capable runtime retires only its own running jobs", (
       assert.equal(jobs[0]?.job?.state, "lost");
       assert.equal(jobs[0]?.job?.output, "partial output");
       assert.equal(jobs[1]?.job?.state, "running");
-    }).pipe(
-      Effect.provide(makeTestLayer({ state, idleTimeoutMs: 1000, stopJob: () => Effect.void })),
-    );
+    }).pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 1000, stopJob: () => Effect.void })));
   }),
 );

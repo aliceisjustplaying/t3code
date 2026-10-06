@@ -14,7 +14,7 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as Recovery from "./ProviderRuntimeRecoveryService.ts";
@@ -26,10 +26,10 @@ import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import type { ProviderAdapterV2Shape } from "./ProviderAdapter.ts";
-import { makeOrchestratorV2ReplayLayerWithRegistry } from "./testkit/ProviderReplayHarness.ts";
+import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 
 const instanceId = ProviderInstanceId.make("pi");
-const database = SqlitePersistenceMemory;
+const database = SqlitePersistence.layerMemory;
 const stores = Layer.mergeAll(ProjectionStore.layer, EventStore.layer, EffectOutbox.layer).pipe(
   Layer.provide(database),
 );
@@ -48,9 +48,9 @@ const layer = Layer.mergeAll(
   database,
   ProjectionStore.layer.pipe(Layer.provide(database)),
   EffectOutbox.layer.pipe(Layer.provide(database)),
-  makeOrchestratorV2ReplayLayerWithRegistry(
+  ProviderReplayHarness.layerWithRegistry(
     { name: "jobs" },
-    ProviderAdapterRegistry.makeLayer([
+    ProviderAdapterRegistry.layerFromAdapters([
       {
         instanceId,
         driver: ProviderDriverKind.make("pi"),

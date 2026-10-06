@@ -13,7 +13,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import { parseHeadsUpNotice } from "./HeadsUpNotice.ts";
@@ -21,7 +21,7 @@ import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import type { ProviderAdapterV2Shape } from "./ProviderAdapter.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
-import { makeOrchestratorV2ReplayLayerWithRegistry } from "./testkit/ProviderReplayHarness.ts";
+import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 
 describe("parseHeadsUpNotice", () => {
   it("reads a Pi notify note with evidence and an explanation", () => {
@@ -58,14 +58,14 @@ const adapter = {
   planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" as const }),
   openSession: () => Effect.die("No provider process needed for heads-up controls"),
 } as ProviderAdapterV2Shape;
-const database = SqlitePersistenceMemory;
+const database = SqlitePersistence.layerMemory;
 const orchestratorLayer = Layer.mergeAll(
   database,
   ProjectionStore.layer.pipe(Layer.provide(database)),
   EffectOutbox.layer.pipe(Layer.provide(database)),
-  makeOrchestratorV2ReplayLayerWithRegistry(
+  ProviderReplayHarness.layerWithRegistry(
     { name: "heads-up" },
-    ProviderAdapterRegistry.makeLayer([adapter]),
+    ProviderAdapterRegistry.layerFromAdapters([adapter]),
     { databaseLayer: database, runEffectWorker: false },
   ),
 );

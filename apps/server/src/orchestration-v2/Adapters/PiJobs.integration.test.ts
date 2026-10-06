@@ -19,9 +19,9 @@ import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 import * as ServerConfig from "../../config.ts";
-import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
+import * as SqlitePersistence from "../../persistence/Sqlite.ts";
 import * as EventSink from "../EventSink.ts";
 import * as EventStore from "../EventStore.ts";
 import * as ProjectionStore from "../ProjectionStore.ts";
@@ -31,7 +31,7 @@ import * as IdAllocator from "../IdAllocator.ts";
 import { ProviderAdapterV2RuntimePolicy, type ProviderAdapterV2Event } from "../ProviderAdapter.ts";
 import { makePiAdapterV2 } from "./PiAdapterV2.ts";
 
-const database = SqlitePersistenceMemory;
+const database = SqlitePersistence.layerMemory;
 const stores = Layer.merge(EventStore.layer, ProjectionStore.layer).pipe(Layer.provide(database));
 const sink = EventSink.layer.pipe(Layer.provide(Layer.merge(stores, database)));
 const ingestor = ProviderEventIngestor.layer.pipe(

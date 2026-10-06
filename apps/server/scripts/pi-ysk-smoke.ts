@@ -20,7 +20,7 @@ import * as Logger from "effect/Logger";
 import * as Layer from "effect/Layer";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 import * as ServerConfig from "../src/config.ts";
 import * as IdAllocator from "../src/orchestration-v2/IdAllocator.ts";
 import * as Orchestrator from "../src/orchestration-v2/Orchestrator.ts";
@@ -30,9 +30,9 @@ import * as ProviderAdapterRegistry from "../src/orchestration-v2/ProviderAdapte
 import * as ProviderEventIngestor from "../src/orchestration-v2/ProviderEventIngestor.ts";
 import * as ProjectionStore from "../src/orchestration-v2/ProjectionStore.ts";
 import * as ThreadCommandExecutor from "../src/orchestration-v2/ThreadCommandExecutor.ts";
-import { SqlitePersistenceMemory } from "../src/persistence/Layers/Sqlite.ts";
+import * as SqlitePersistence from "../src/persistence/Sqlite.ts";
 import { makePiAdapterV2 } from "../src/orchestration-v2/Adapters/PiAdapterV2.ts";
-import { makeOrchestratorV2ReplayLayerWithRegistry } from "../src/orchestration-v2/testkit/ProviderReplayHarness.ts";
+import * as ProviderReplayHarness from "../src/orchestration-v2/testkit/ProviderReplayHarness.ts";
 
 // Opt-in integration check: real installed Pi + YSK, isolated state, no model calls.
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -97,16 +97,16 @@ const program = Effect.gen(function* () {
       Effect.orDie,
     ),
   );
-  const database = SqlitePersistenceMemory;
+  const database = SqlitePersistence.layerMemory;
   const base = Layer.mergeAll(
     EffectOutbox.layer.pipe(Layer.provide(database)),
     IdAllocator.layer,
     ThreadCommandExecutor.layer,
     ProjectionStore.layer.pipe(Layer.provide(database)),
   );
-  const runtime = makeOrchestratorV2ReplayLayerWithRegistry(
+  const runtime = ProviderReplayHarness.layerWithRegistry(
     { name: scenario, runtimePolicyOverride: { cwd: root } },
-    ProviderAdapterRegistry.makeLayer([adapter]),
+    ProviderAdapterRegistry.layerFromAdapters([adapter]),
     { databaseLayer: database, runEffectWorker: false },
   );
   const ingestion = ProviderEventIngestor.layer.pipe(Layer.provide(Layer.mergeAll(base, runtime)));
