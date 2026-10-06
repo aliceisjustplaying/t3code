@@ -8,10 +8,16 @@ import {
   ProviderThreadId,
   ThreadId,
   TurnItemId,
+  type OrchestrationV2ThreadProjection,
+  type OrchestrationV2StoredEvent,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
+import * as Stream from "effect/Stream";
+import { applyOrchestrationV2ProjectionEvent } from "../../../../packages/client-runtime/src/state/orchestrationV2Projection.ts";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
@@ -248,4 +254,169 @@ it.effect("resolving a heads-up persists, survives a small window, and can be un
       });
     }
   }).pipe(Effect.provide(orchestratorLayer)),
+);
+
+// Command fan-out owns this regression: SQL-only tests cannot detect a stale
+// subscribed parent whose inbox action targets the deduplicated source row.
+it.live("synchronizes every forwarded thread live and on replay with one source feedback", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const source = ThreadId.make("copy-source");
+      const parent = ThreadId.make("copy-parent");
+      const providerThreadId = ProviderThreadId.make("copy-session");
+      const now = yield* DateTime.now;
+      for (const threadId of [source, parent]) {
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`create-${threadId}`),
+          threadId,
+          projectId: ProjectId.make("copies"),
+          title: threadId,
+          modelSelection: { instanceId, model: "gpt-5.1-codex" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdBy: "user",
+          creationSource: "web",
+        });
+        for (const suffix of ["first", "repeat", "other-session", "other-source"]) {
+          yield* projections.apply({
+            id: EventId.make(`seed-${threadId}-${suffix}`),
+            type: "turn-item.updated",
+            threadId,
+            occurredAt: now,
+            payload: {
+              id: TurnItemId.make(`${threadId}-${suffix}`),
+              threadId,
+              runId: null,
+              nodeId: null,
+              providerThreadId:
+                suffix === "other-session"
+                  ? ProviderThreadId.make("other-session")
+                  : providerThreadId,
+              providerTurnId: null,
+              nativeItemRef: null,
+              parentItemId: null,
+              ordinal: 1,
+              status: "completed",
+              title: "Note",
+              startedAt: now,
+              completedAt: now,
+              updatedAt: now,
+              type: "system_notice",
+              message: "Note",
+              headsUp: {
+                ...(suffix === "other-source"
+                  ? { sourceThreadId: ThreadId.make("other-source") }
+                  : threadId === parent
+                    ? { sourceThreadId: source }
+                    : {}),
+                noteId: "shared",
+                tag: "Heads up",
+                line: "Shared note",
+              },
+            },
+          });
+        }
+      }
+      const initial = new Map<ThreadId, OrchestrationV2ThreadProjection>();
+      const live = new Map<
+        ThreadId,
+        Fiber.Fiber<ReadonlyArray<OrchestrationV2StoredEvent>, Orchestrator.OrchestratorV2Error>
+      >();
+      const attach = yield* Deferred.make<void>();
+      for (const threadId of [source, parent]) {
+        initial.set(threadId, yield* projections.getThreadProjection(threadId));
+        const ready = yield* Deferred.make<void>();
+        // Hold replay at the existing create event. The command then lands
+        // before live attachment, so delivery must bridge that race.
+        const watcher = yield* orchestrator.streamStoredEventsFrom({ threadId }).pipe(
+          Stream.tap((stored) =>
+            stored.event.type === "thread.created"
+              ? Deferred.succeed(ready, undefined).pipe(Effect.andThen(Deferred.await(attach)))
+              : Effect.void,
+          ),
+          Stream.take(2),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        live.set(threadId, watcher);
+        yield* Deferred.await(ready);
+      }
+      let cursor = Math.max(
+        yield* orchestrator.getThreadEventSequence(source),
+        yield* orchestrator.getThreadEventSequence(parent),
+      );
+      for (const action of ["read", "dismiss", "knew", "restore"] as const) {
+        const commandId = CommandId.make(`copy-${action}`);
+        const resolution = action === "restore" || action === "read" ? null : action;
+        const threadId = action === "knew" || action === "restore" ? parent : source;
+        const command =
+          action === "read"
+            ? {
+                type: "thread.heads-up.read" as const,
+                commandId,
+                threadId,
+                turnItemId: TurnItemId.make(`${threadId}-first`),
+              }
+            : {
+                type: "thread.heads-up.resolve" as const,
+                commandId,
+                threadId,
+                turnItemId: TurnItemId.make(`${threadId}-first`),
+                resolution,
+              };
+        const result = yield* orchestrator.dispatch(command);
+        assert.deepEqual(
+          result.storedEvents.map((stored) => stored.event.threadId).sort(),
+          [source, parent].sort(),
+        );
+        const effects = yield* outbox.listByCommandId(commandId);
+        assert.equal(effects.length, action === "read" ? 0 : 1);
+        if (action !== "read") {
+          assert.equal(effects[0]?.threadId, source);
+          assert.deepEqual(effects[0]?.request, {
+            type: "provider-heads-up.answer",
+            providerThreadId,
+            noteId: "shared",
+            resolution,
+          });
+        }
+        // Retrying a command must not duplicate either feedback or fan-out events.
+        assert.deepEqual((yield* orchestrator.dispatch(command)).storedEvents, result.storedEvents);
+        assert.equal((yield* outbox.listByCommandId(commandId)).length, effects.length);
+        if (action === "read") yield* Deferred.succeed(attach, undefined);
+        for (const copyThreadId of [source, parent]) {
+          const replay = yield* orchestrator
+            .streamStoredEventsFrom({ threadId: copyThreadId, afterSequence: cursor })
+            .pipe(Stream.take(1), Stream.runCollect);
+          if (action === "read")
+            assert.deepEqual((yield* Fiber.join(live.get(copyThreadId)!)).slice(1), replay);
+          const before = initial.get(copyThreadId)!;
+          const after = applyOrchestrationV2ProjectionEvent(before, replay[0]!.event)!;
+          const durable = yield* projections.getThreadProjection(copyThreadId);
+          for (const suffix of ["first", "repeat", "other-session", "other-source"]) {
+            const id = `${copyThreadId}-${suffix}`;
+            const item = after.turnItems.find((item) => item.id === id);
+            const persisted = durable.turnItems.find((item) => item.id === id);
+            assert(item?.type === "system_notice" && persisted?.type === "system_notice");
+            assert.deepEqual(item.headsUp, persisted.headsUp);
+            if (suffix === "first" || suffix === "repeat") {
+              assert.isDefined(item.headsUp?.readAt);
+              assert.equal(item.headsUp?.resolution, resolution ?? undefined);
+            } else {
+              assert.isUndefined(item.headsUp?.readAt);
+              assert.isUndefined(item.headsUp?.resolution);
+            }
+          }
+          initial.set(copyThreadId, after);
+        }
+        cursor = result.sequence;
+      }
+    }),
+  ).pipe(Effect.provide(orchestratorLayer)),
 );
