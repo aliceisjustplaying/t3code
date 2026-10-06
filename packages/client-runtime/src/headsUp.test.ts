@@ -1,7 +1,7 @@
-import { TurnItemId } from "@t3tools/contracts";
+import { ThreadId, TurnItemId, type HeadsUpInboxEntry } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { headsUpChatMessage, pendingHeadsUps } from "./headsUp.ts";
+import { appendHeadsUpFollowUp, headsUpChatMessage, pendingHeadsUps } from "./headsUp.ts";
 
 const notice = (id: string, resolution?: "knew") =>
   ({
@@ -40,4 +40,35 @@ describe("headsUpChatMessage", () => {
       "Here is a note offered by a side agent:\n> Heads up · Uses pnpm.\n> Evidence: pnpm-lock.yaml\n>\n> **Why**\n>\n> Because.",
     );
   });
+});
+
+it("preserves an unsent draft verbatim while attributing a source notice to its parent follow-up", () => {
+  const entry: HeadsUpInboxEntry = {
+    id: "source-identity",
+    threadId: ThreadId.make("source"),
+    turnItemId: TurnItemId.make("note"),
+    sourceThreadId: ThreadId.make("source"),
+    sourceThreadTitle: "Cache review",
+    targetThreadId: ThreadId.make("parent"),
+    targetThreadTitle: "Fix caching",
+    providerThreadId: null,
+    createdAt: "2026-10-06T00:00:00.000Z",
+    readAt: null,
+    note: {
+      noteId: "n1",
+      tag: "Heads up",
+      line: "Stale cache",
+      evidence: "cache.ts:12",
+      explanation: "The TTL is wrong.",
+    },
+  };
+  const original = "Keep this draft\n@[file:cache.ts]  ";
+  const draft = appendHeadsUpFollowUp(original, entry);
+  expect(draft.startsWith(`${original}\n\n`)).toBe(true);
+  expect(draft).toContain('from "Cache review" (source thread source)');
+  expect(draft).toContain('Follow-up for "Fix caching" (target thread parent)');
+  expect(draft).toContain("> Evidence: cache.ts:12");
+  expect(draft).toContain("> The TTL is wrong.");
+  expect(appendHeadsUpFollowUp("", entry)).not.toMatch(/^\s/);
+  expect(entry.note.resolution).toBeUndefined();
 });
