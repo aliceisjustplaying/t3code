@@ -129,7 +129,7 @@ export function ThreadDetailsCard({
       style={placement ? { maxHeight: height } : undefined}
       data-thread-details-card
     >
-      <ScrollArea scrollFade className="min-h-0">
+      <ScrollArea scrollFade verticalOnly className="min-h-0">
         <div ref={setContentElement}>{children(density)}</div>
       </ScrollArea>
     </div>

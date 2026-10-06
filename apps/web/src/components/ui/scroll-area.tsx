@@ -29,6 +29,7 @@ function ScrollArea({
   scrollbarGutter = false,
   hideScrollbars = false,
   chainVerticalScroll = false,
+  verticalOnly = false,
   radius = "inherit",
   viewportTabIndex,
   ...props
@@ -40,6 +41,8 @@ function ScrollArea({
   scrollbarGutter?: boolean;
   hideScrollbars?: boolean;
   chainVerticalScroll?: boolean;
+  /** Fit-to-width lists scroll vertically without horizontal touch panning. */
+  verticalOnly?: boolean;
   /** The viewport clips to the parent's radius; "none" for a region flush to an edge. */
   radius?: "inherit" | "none";
   /** Override Base UI's focusable viewport when focusable descendants provide scroll access. */
@@ -57,7 +60,11 @@ function ScrollArea({
       <ScrollAreaPrimitive.Viewport
         {...(viewportTabIndex === undefined ? {} : { tabIndex: viewportTabIndex })}
         className={cn(
-          "h-full max-h-[inherit] overflow-auto overscroll-contain rounded-[inherit] outline-none transition-shadow focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background data-has-overflow-x:overscroll-x-contain",
+          "h-full max-h-[inherit] overflow-auto overscroll-contain rounded-[inherit] outline-none transition-shadow focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background",
+          // Base UI supplies inline overflow: scroll; override only the disabled axis.
+          verticalOnly
+            ? "overflow-x-hidden! overscroll-x-none touch-pan-y touch-pinch-zoom"
+            : "data-has-overflow-x:overscroll-x-contain",
           chainVerticalScroll && "overscroll-y-auto",
           scrollFade &&
             "mask-t-from-[calc(100%-min(var(--fade-size),var(--scroll-area-overflow-y-start)))] mask-b-from-[calc(100%-min(var(--fade-size),var(--scroll-area-overflow-y-end)))] mask-l-from-[calc(100%-min(var(--fade-size),var(--scroll-area-overflow-x-start)))] mask-r-from-[calc(100%-min(var(--fade-size),var(--scroll-area-overflow-x-end)))] [--fade-size:1.5rem]",
@@ -73,8 +80,12 @@ function ScrollArea({
       {!hideScrollbars && (
         <>
           <ScrollBar orientation="vertical" />
-          <ScrollBar orientation="horizontal" />
-          <ScrollAreaPrimitive.Corner data-slot="scroll-area-corner" />
+          {!verticalOnly && (
+            <>
+              <ScrollBar orientation="horizontal" />
+              <ScrollAreaPrimitive.Corner data-slot="scroll-area-corner" />
+            </>
+          )}
         </>
       )}
     </ScrollAreaPrimitive.Root>
