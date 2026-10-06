@@ -34,10 +34,5 @@ export function threadJobs(items: ReadonlyArray<OrchestrationV2TurnItem>): Threa
         : {}),
     });
   }
-  const rank = (job: ThreadJob) =>
-    jobIsActive(job) ? 0 : job.state === "failed" || job.state === "timed_out" ? 1 : 2;
-  return jobs.sort(
-    (a, b) =>
-      rank(a) - rank(b) || b.startedAt - a.startedAt || a.turnItemId.localeCompare(b.turnItemId),
-  );
+  return jobs.sort((a, b) => b.startedAt - a.startedAt || a.turnItemId.localeCompare(b.turnItemId));
 }
