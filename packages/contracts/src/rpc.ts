@@ -144,6 +144,12 @@ import {
 } from "./review.ts";
 import { KeybindingsConfigError } from "./keybindings.ts";
 import {
+  HeadsUpInboxInput,
+  HeadsUpInboxPage,
+  HeadsUpInboxSummary,
+  HeadsUpInboxError,
+} from "./headsUpInbox.ts";
+import {
   OrchestrationSearchThreadsError,
   OrchestrationSearchThreadsInput,
   OrchestrationSearchThreadsResult,
@@ -1565,6 +1571,17 @@ const WsOrchestrationV2GetFullThreadDiffRpc = Rpc.make(
   },
 );
 
+const WsHeadsUpInboxRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.getHeadsUpInbox, {
+  payload: HeadsUpInboxInput,
+  success: HeadsUpInboxPage,
+  error: Schema.Union([HeadsUpInboxError, EnvironmentAuthorizationError]),
+});
+const WsSubscribeHeadsUpInboxRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.subscribeHeadsUpInbox, {
+  payload: Schema.Struct({}),
+  success: HeadsUpInboxSummary,
+  error: Schema.Union([HeadsUpInboxError, EnvironmentAuthorizationError]),
+  stream: true,
+});
 const WsOrchestrationV2SearchThreadsRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.searchThreads, {
   payload: OrchestrationSearchThreadsInput,
   success: OrchestrationSearchThreadsResult,
@@ -1956,6 +1973,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationV2GetTurnItemRpc,
   WsOrchestrationV2GetTurnDiffRpc,
   WsOrchestrationV2GetFullThreadDiffRpc,
+  WsHeadsUpInboxRpc,
+  WsSubscribeHeadsUpInboxRpc,
   WsOrchestrationV2SearchThreadsRpc,
   WsOrchestrationV2GetArchivedShellSnapshotRpc,
   WsOrchestrationV2GetThreadProjectionRpc,

@@ -511,7 +511,7 @@ export const layer: Layer.Layer<
             const id = TurnItemId.make(
               item.job
                 ? `job:${item.id}`
-                : `heads-up:${encodeURIComponent(item.threadId)}:${encodeURIComponent(item.headsUp!.noteId)}`,
+                : `heads-up:${encodeURIComponent(item.threadId)}:${encodeURIComponent(item.providerThreadId ?? "")}:${encodeURIComponent(item.headsUp!.noteId)}`,
             );
             const previous = yield* projections.getTurnItem({
               threadId: parentThreadId,

@@ -1,4 +1,5 @@
 import type {
+  HeadsUpInboxEntry,
   OrchestrationV2HeadsUp,
   OrchestrationV2TurnItem,
   TurnItemId,
@@ -8,7 +9,7 @@ export interface PendingHeadsUp extends OrchestrationV2HeadsUp {
   readonly turnItemId: TurnItemId;
 }
 
-/** Every unresolved heads-up note, oldest first. The first is the one the band acts on. */
+/** Unresolved notes in a single thread projection, in projection order. */
 export function pendingHeadsUps(
   items: ReadonlyArray<OrchestrationV2TurnItem>,
 ): ReadonlyArray<PendingHeadsUp> {
@@ -21,7 +22,7 @@ export function pendingHeadsUps(
   return pending;
 }
 
-/** The note quoted into the conversation, as Pi's "Chat in main session" sends it. */
+/** The note quoted into a follow-up draft. */
 export function headsUpChatMessage(
   note: Pick<OrchestrationV2HeadsUp, "tag" | "line" | "evidence" | "explanation">,
 ): string {
@@ -35,4 +36,11 @@ export function headsUpChatMessage(
     .map((line) => (line === "" ? ">" : `> ${line}`))
     .join("\n");
   return `Here is a note offered by a side agent:\n${body}`;
+}
+
+/** Append only: the original unsent draft, including its context references, stays intact. */
+export function appendHeadsUpFollowUp(draft: string, entry: HeadsUpInboxEntry): string {
+  const attribution = `You should know from "${entry.sourceThreadTitle}" (source thread ${entry.sourceThreadId}). Follow-up for "${entry.targetThreadTitle}" (target thread ${entry.targetThreadId}):`;
+  const followUp = `${attribution}\n${headsUpChatMessage(entry.note)}\n\nCan you explain the impact and suggest a fix?`;
+  return draft.length > 0 ? `${draft}\n\n${followUp}` : followUp;
 }
