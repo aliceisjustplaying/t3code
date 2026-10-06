@@ -355,7 +355,7 @@ it("does not scan every row against every run for a streaming item update", () =
 });
 
 it.each([undefined, ThreadId.make("child-thread")])(
-  "restores an old heads-up absent from a partial window (source %s)",
+  "does not expand a partial transcript for an inbox notice (source %s)",
   (sourceThreadId) => {
     const recent = commandItem("recent", "done", 100);
     const projection = {
@@ -393,8 +393,8 @@ it.each([undefined, ThreadId.make("child-thread")])(
       } as OrchestrationV2DomainEvent,
       { partialTimeline: true, latestLocalTurnOrdinal: 100 },
     );
-    expect(next?.turnItems).toContainEqual(restored);
-    // Restoring a composer control must not expand the paged transcript.
+    expect(next?.turnItems).toEqual(projection.turnItems);
+    // Inbox state is fetched independently of the paged transcript.
     expect(next?.visibleTurnItems).toEqual(projection.visibleTurnItems);
   },
 );

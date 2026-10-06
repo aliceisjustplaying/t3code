@@ -248,17 +248,37 @@ export function applyOrchestrationV2ProjectionEvent(
       return { ...base, messages: upsertEntity(base.messages, event.payload) };
     case "plan.updated":
       return { ...base, plans: upsertEntity(base.plans, event.payload) };
+    case "thread.heads-up.updated":
+      return {
+        ...base,
+        turnItems: base.turnItems.map((item) => {
+          if (
+            item.type !== "system_notice" ||
+            item.headsUp === undefined ||
+            (item.headsUp.sourceThreadId ?? item.threadId) !== event.payload.sourceThreadId ||
+            item.providerThreadId !== event.payload.providerThreadId ||
+            item.headsUp.noteId !== event.payload.noteId
+          )
+            return item;
+          const { resolution: previous, ...note } = item.headsUp;
+          const resolution =
+            event.payload.resolution === undefined ? previous : event.payload.resolution;
+          return {
+            ...item,
+            headsUp: {
+              ...note,
+              ...(event.payload.readAt === undefined ? {} : { readAt: event.payload.readAt }),
+              ...(resolution == null ? {} : { resolution }),
+            },
+          };
+        }),
+      };
     case "turn-item.updated": {
-      // Undo restores composer state even when the note predates this history page.
-      // The visible-row guard below still keeps the transcript window bounded.
+      // Jobs remain chat controls. Heads-ups use the environment inbox query.
       if (
         partialTimeline &&
         !projection.turnItems.some((candidate) => candidate.id === event.payload.id) &&
-        !(
-          event.payload.type === "system_notice" &&
-          (event.payload.job !== undefined ||
-            (event.payload.headsUp !== undefined && event.payload.headsUp.resolution === undefined))
-        ) &&
+        !(event.payload.type === "system_notice" && event.payload.job !== undefined) &&
         shouldDropMissingPartialTurnItem(projection, event.payload, latestLocalTurnOrdinal)
       ) {
         return projection;
