@@ -275,11 +275,11 @@ function sessionKey(providerSessionId: ProviderSessionId): string {
 }
 
 /**
- * Runtime requests with no provider turn belong to the live session itself.
- * Their node and transcript item are runless too, so they bypass the normal
- * per-run subscriber and are persisted by the session event pump.
+ * Runless requests and job snapshots belong to the live session, not a turn
+ * subscriber. Jobs keep their originating run attribution even when a later
+ * turn is active, so their entire lifecycle is persisted by the session pump.
  */
-function sessionScopedRuntimeRequestThreadId(event: ProviderAdapterV2Event): ThreadId | undefined {
+function sessionScopedEventThreadId(event: ProviderAdapterV2Event): ThreadId | undefined {
   switch (event.type) {
     case "runtime_request.updated":
       return event.runtimeRequest.providerTurnId === null ? event.threadId : undefined;
@@ -288,6 +288,9 @@ function sessionScopedRuntimeRequestThreadId(event: ProviderAdapterV2Event): Thr
         ? event.node.threadId
         : undefined;
     case "turn_item.updated":
+      if (event.turnItem.type === "system_notice" && event.turnItem.job !== undefined) {
+        return event.turnItem.threadId;
+      }
       return event.turnItem.runId === null &&
         (event.turnItem.type === "approval_request" || event.turnItem.type === "user_input_request")
         ? event.turnItem.threadId
@@ -1951,17 +1954,27 @@ export const layerWithOptions = (
               ),
               Effect.andThen(
                 Effect.gen(function* () {
-                  // Some providers can block before a run subscriber exists
-                  // (project trust, login, or session-switch hooks). Persist
-                  // their runless request artifacts directly so the normal T3
-                  // request UI can answer them and unblock session setup.
-                  const threadId = sessionScopedRuntimeRequestThreadId(event);
+                  // Requests can block before a run subscriber exists. Jobs
+                  // can finish after it closes. Neither may depend on a turn's
+                  // lifetime, and publishing them too would ingest them twice.
+                  const threadId = sessionScopedEventThreadId(event);
                   if (threadId !== undefined) {
                     yield* Effect.gen(function* () {
                       const current = (yield* Ref.get(sessions)).get(
                         sessionKey(entry.runtime.providerSessionId),
                       );
                       if (current?.runtime !== entry.runtime) return;
+                      if (
+                        event.type === "turn_item.updated" &&
+                        event.turnItem.type === "system_notice" &&
+                        event.turnItem.job !== undefined &&
+                        (!current.attachedThreadIds.has(threadId) ||
+                          event.driver !== entry.runtime.driver ||
+                          event.turnItem.job.providerSessionId !==
+                            entry.runtime.providerSessionId ||
+                          event.turnItem.job.sourceThreadId !== undefined)
+                      )
+                        return;
                       yield* providerEventIngestor
                         .ingestNormalized({
                           providerSessionId: entry.runtime.providerSessionId,
