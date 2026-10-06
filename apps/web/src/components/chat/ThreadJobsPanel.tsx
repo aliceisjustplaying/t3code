@@ -64,7 +64,6 @@ export function ThreadJobsPanel(props: Target & { onSelect: (id: TurnItemId) => 
         .map((job) => (
           <ThreadDetailsControl
             key={job.turnItemId}
-            className="pointer-coarse:min-h-11"
             onClick={() => props.onSelect(job.turnItemId)}
             title={job.sourceTitle ? `Subagent: ${job.sourceTitle}` : job.name}
           >
@@ -88,7 +87,6 @@ export function ThreadJobsPanel(props: Target & { onSelect: (id: TurnItemId) => 
         ))}
       {finishedCount > 0 && (
         <ThreadDetailsControl
-          className="pointer-coarse:min-h-11"
           tone="muted"
           aria-expanded={finished}
           onClick={() => setFinished(!finished)}
