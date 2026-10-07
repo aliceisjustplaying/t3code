@@ -103,6 +103,7 @@ interface FakePi {
   readonly failNextCommands: () => void;
   /** Close the fake process stdout stream. */
   readonly closeStdout: Effect.Effect<void>;
+  readonly setBackgroundWork: (pending: boolean) => void;
   readonly lastSpawn: () => {
     readonly args: ReadonlyArray<string>;
     readonly env: NodeJS.ProcessEnv;
@@ -142,6 +143,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   const statsQueue: Array<unknown> = [];
   const commandsQueue: Array<{ readonly success: boolean; readonly data?: unknown }> = [];
   const allRequests: Array<PiRpcRecord> = [];
+  let backgroundWork = false;
   let deferState = false;
   let deferredStateRequest: PiRpcRecord | undefined;
   let failState = false;
@@ -223,6 +225,14 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
         if (record["type"] === deferredLifecycle) {
           deferredLifecycle = undefined;
           continue;
+        }
+        if (record["type"] === "prompt" && record["message"] === "/t3-background-work") {
+          yield* emit({
+            type: "extension_ui_request",
+            method: "setStatus",
+            statusKey: "t3:background-work",
+            statusText: backgroundWork ? "pending" : "idle",
+          });
         }
         const response = respondTo(record);
         if (response !== null) yield* emit(response);
@@ -307,6 +317,9 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
     queueStats: (data) => statsQueue.push(data),
     queueCommands: (data) => commandsQueue.push({ success: true, data }),
     failNextCommands: () => commandsQueue.push({ success: false }),
+    setBackgroundWork: (pending) => {
+      backgroundWork = pending;
+    },
     closeStdout: Queue.end(stdout),
     lastSpawn: () => lastSpawn,
   } satisfies FakePi;
@@ -475,6 +488,7 @@ describe("PiAdapterV2", () => {
       const fake = yield* makeFakePi;
       const { runtime } = yield* openRuntime(fake);
       for (const pending of [true, false]) {
+        fake.setBackgroundWork(pending);
         const probe = yield* Effect.forkChild(runtime.hasPendingBackgroundWork!);
         const request = yield* fake.takeRequest("prompt");
         assert.equal(request["message"], "/t3-background-work");
@@ -488,7 +502,6 @@ describe("PiAdapterV2", () => {
       }
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
-
 
   it.effect("hands a turn Pi starts on its own to the continuation turn it asks for", () =>
     Effect.gen(function* () {
@@ -561,8 +574,13 @@ describe("PiAdapterV2", () => {
       );
       const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
       assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
-      // The continuation only takes over the run; it never prompts Pi.
-      assert.isFalse(fake.allRequests().some((record) => record.type === "prompt"));
+      // Taking over the run must not send another model prompt; only the
+      // extension keepalive query is allowed.
+      assert.isFalse(
+        fake
+          .allRequests()
+          .some((record) => record.type === "prompt" && record.message !== "/t3-background-work"),
+      );
       // A taken wake asks for no second turn.
       assert.deepEqual(yield* offer.dispatchIfCurrent!(Effect.succeed("again")), Option.none());
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
@@ -719,8 +737,8 @@ describe("PiAdapterV2", () => {
           pendingMessageCount: 0,
         });
         // Let that answer reach the event pump ahead of the ack, the order that
-      // ended the turn early. The turn must survive the other order too.
-      for (let i = 0; i < 100; i++) yield* Effect.yieldNow;
+        // ended the turn early. The turn must survive the other order too.
+        for (let i = 0; i < 100; i++) yield* Effect.yieldNow;
         yield* fake.emit({
           type: "response",
           command: "prompt",
@@ -753,6 +771,33 @@ describe("PiAdapterV2", () => {
         // Settling on the stale idle answer would end the turn before its reply.
         assert.include(replies, "Hello back.");
         assert.equal(yield* Queue.size(offers), 0);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "keeps delegated completion pending through background work until the final follow-up settles",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const { runtime, takeEvent } = yield* openRuntime(fake);
+        let providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        // The same keepalive covers a running wake-capable job and its held wake.
+        for (const [index, pending] of [true, true, false].entries()) {
+          fake.setBackgroundWork(pending);
+          yield* startTurn(runtime, providerThread, "default", [], "Work", undefined, index + 1);
+          yield* fake.emit({ type: "agent_start" });
+          yield* fake.emit({ type: "agent_settled" });
+          while (true) {
+            const event = yield* takeEvent(() => true);
+            if (event.type === "provider_thread.updated") providerThread = event.providerThread;
+            if (event.type === "turn.terminal") break;
+          }
+          assert.equal((providerThread.pendingBackgroundTasks?.length ?? 0) > 0, pending);
+        }
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
