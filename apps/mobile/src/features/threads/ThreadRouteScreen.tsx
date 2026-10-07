@@ -262,22 +262,20 @@ function ThreadRouteContent(
       .join(" · "),
     onPress: () => setSelectedJobId(job.turnItemId),
   });
-  const priorityJobs = jobs.filter(
-    (job) => jobIsActive(job) || job.state === "failed" || job.state === "timed_out",
-  );
-  const finishedJobs = jobs.filter((job) => !priorityJobs.includes(job));
+  const recentJobs = jobs.slice(0, 5);
+  const olderJobs = jobs.slice(5);
   const jobsMenu: ScreenHeaderMenu | undefined = jobs.length
     ? {
         title: "Jobs · " + jobs.filter(jobIsActive).length + " running",
         icon: "terminal",
         items: [
-          ...priorityJobs.map(jobMenuItem),
-          ...(finishedJobs.length
+          ...recentJobs.map(jobMenuItem),
+          ...(olderJobs.length
             ? [
                 {
-                  id: "finished-jobs",
-                  title: "Finished (" + finishedJobs.length + ")",
-                  items: finishedJobs.map(jobMenuItem),
+                  id: "older-jobs",
+                  title: "Older jobs (" + olderJobs.length + ")",
+                  items: olderJobs.map(jobMenuItem),
                 },
               ]
             : []),

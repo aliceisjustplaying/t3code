@@ -232,7 +232,7 @@ function Probe() {
 }
 async function openNotice() {
   await act(async () => root.render(createElement(Probe)));
-  await act(async () => ui.presses.get("You should know, 0 unread")!());
+  await act(async () => ui.presses.get("You should know, 1 unresolved, 0 unread")!());
   ui.command.mockClear();
 }
 beforeEach(() => {
@@ -326,7 +326,7 @@ it.each(["dismiss", "knew"] as const)(
   "%s can be saved from a collapsed native row and blocks other actions while saving",
   async (resolution) => {
     await act(async () => root.render(createElement(Probe)));
-    await act(async () => ui.presses.get("You should know, 0 unread")!());
+    await act(async () => ui.presses.get("You should know, 1 unresolved, 0 unread")!());
     const saving = Promise.withResolvers<{ _tag: string }>();
     ui.command.mockReturnValueOnce(saving.promise);
     const stopPropagation = vi.fn();
@@ -349,7 +349,7 @@ it.each(["dismiss", "knew"] as const)(
 
 it("native Reviewed restores without expansion and exposes failed updates for retry", async () => {
   await act(async () => root.render(createElement(Probe)));
-  await act(async () => ui.presses.get("You should know, 0 unread")!());
+  await act(async () => ui.presses.get("You should know, 1 unresolved, 0 unread")!());
   await act(async () => ui.presses.get("tab")!());
   ui.command.mockResolvedValueOnce({ _tag: "Failure" });
   await act(async () => ui.actions.get("Undo")!.press({ stopPropagation() {} }));
