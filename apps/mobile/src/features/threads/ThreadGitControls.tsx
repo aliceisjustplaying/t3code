@@ -1,3 +1,4 @@
+import type { NativeStackHeaderItemMenuSubmenu } from "@react-navigation/native-stack";
 import { createNativeHeaderMenu } from "../../components/nativeHeaderMenu.ios";
 import type { ScreenHeaderMenu } from "../../components/ScreenHeader.types";
 import {
@@ -385,44 +386,34 @@ function useThreadGitHeaderActionItems(props: ThreadGitControlsProps): ThreadGit
             ...(props.jobsMenu
               ? [
                   {
-                    type: "menu" as const,
+                    type: "submenu",
                     label: props.jobsMenu.title,
-                    menu: {
-                      title: props.jobsMenu.title,
-                      items: props.jobsMenu.items.flatMap<HeaderItem>((item) =>
-                        "items" in item
-                          ? [
-                              {
-                                type: "menu" as const,
-                                label: item.title,
-                                menu: {
-                                  title: item.title,
-                                  items: item.items.flatMap((child) =>
-                                    "onPress" in child
-                                      ? [
-                                          {
-                                            type: "action" as const,
-                                            label: child.title,
-                                            description: child.subtitle,
-                                            onPress: child.onPress,
-                                          },
-                                        ]
-                                      : [],
-                                  ),
-                                },
-                              },
-                            ]
-                          : [
-                              {
-                                type: "action" as const,
-                                label: item.title,
-                                description: item.subtitle,
-                                onPress: item.onPress,
-                              },
-                            ],
-                      ),
-                    },
-                  },
+                    items: props.jobsMenu.items.map((item) =>
+                      "items" in item
+                        ? {
+                            type: "submenu" as const,
+                            label: item.title ?? "",
+                            items: item.items.flatMap((child) =>
+                              "onPress" in child
+                                ? [
+                                    {
+                                      type: "action" as const,
+                                      label: child.title,
+                                      subtitle: child.subtitle,
+                                      onPress: child.onPress,
+                                    },
+                                  ]
+                                : [],
+                            ),
+                          }
+                        : {
+                            type: "action" as const,
+                            label: item.title,
+                            subtitle: item.subtitle,
+                            onPress: item.onPress,
+                          },
+                    ),
+                  } satisfies NativeStackHeaderItemMenuSubmenu,
                 ]
               : []),
             ...(props.onMergeBack
