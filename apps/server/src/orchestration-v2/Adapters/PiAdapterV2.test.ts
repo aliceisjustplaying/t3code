@@ -486,7 +486,7 @@ describe("PiAdapterV2", () => {
         });
         assert.equal(yield* Fiber.join(probe), pending);
       }
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
 
@@ -673,7 +673,7 @@ describe("PiAdapterV2", () => {
           terminal.status === "failed" &&
           terminal.failure.message === "Agent is already processing.",
       );
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect(
@@ -753,7 +753,7 @@ describe("PiAdapterV2", () => {
         // Settling on the stale idle answer would end the turn before its reply.
         assert.include(replies, "Hello back.");
         assert.equal(yield* Queue.size(offers), 0);
-      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("injects the T3 MCP extension and bearer when a session exists", () =>
