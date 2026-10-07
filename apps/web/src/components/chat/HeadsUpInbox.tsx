@@ -186,16 +186,33 @@ function InboxPages({
       if (mounted.current) setBusy(null);
     }
   };
-  const ask = (entry: HeadsUpInboxEntry) => {
-    const target = scopeThreadRef(environmentId, entry.targetThreadId);
-    const store = useComposerDraftStore.getState();
-    store.setPrompt(
-      target,
-      appendHeadsUpFollowUp(store.getComposerDraft(target)?.prompt ?? "", entry),
-    );
-    onClose();
-    if (threadId !== entry.targetThreadId)
-      void navigate({ to: "/$environmentId/$threadId", params: buildThreadRouteParams(target) });
+  const ask = async (entry: HeadsUpInboxEntry) => {
+    setBusy(entry.id);
+    setActionError(null);
+    try {
+      const result = await resolve({
+        environmentId,
+        input: { threadId: entry.threadId, turnItemId: entry.turnItemId, resolution: "dismiss" },
+      });
+      if (!mounted.current) return;
+      if (result._tag !== "Success") {
+        setActionError("The notice could not be updated. Try again.");
+        return;
+      }
+      const target = scopeThreadRef(environmentId, entry.targetThreadId);
+      const store = useComposerDraftStore.getState();
+      store.setPrompt(
+        target,
+        appendHeadsUpFollowUp(store.getComposerDraft(target)?.prompt ?? "", entry),
+      );
+      onClose();
+      if (threadId !== entry.targetThreadId)
+        void navigate({ to: "/$environmentId/$threadId", params: buildThreadRouteParams(target) });
+    } catch {
+      if (mounted.current) setActionError("The notice could not be updated. Try again.");
+    } finally {
+      if (mounted.current) setBusy(null);
+    }
   };
   const loadError = page.error ?? summary.error;
   return (
@@ -305,7 +322,7 @@ function InboxPages({
                   aria-label={`Ask agent · Draft: ${entry.note.line}`}
                   onClick={(event) => {
                     event.stopPropagation();
-                    ask(entry);
+                    void ask(entry);
                   }}
                 >
                   Ask agent · Draft
@@ -388,8 +405,8 @@ function InboxPages({
                   </>
                 ) : null}
                 <p className="text-xs text-muted-foreground">
-                  Ask agent appends to the target thread’s unsent draft. Nothing is sent or
-                  resolved.
+                  Ask agent adds the note to the target thread’s unsent draft and dismisses it from
+                  Unresolved. Nothing is sent.
                 </p>
               </div>
             ) : null}

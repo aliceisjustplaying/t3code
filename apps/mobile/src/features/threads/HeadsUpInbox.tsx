@@ -11,7 +11,7 @@ import * as Option from "effect/Option";
 import { AsyncResult } from "effect/reactivity";
 import { useEffect, useRef, useState } from "react";
 import { Modal, Pressable, ScrollView, View } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 
 import { AppText as Text } from "../../components/AppText";
 import { SymbolView } from "../../components/AppSymbol";
@@ -60,35 +60,43 @@ export function useHeadsUpInbox(environmentId: EnvironmentId, threadId: ThreadId
         onRequestClose={() => setOpen(false)}
       >
         {open ? (
-          <SafeAreaView className="flex-1 bg-screen">
-            <View className="flex-row items-center gap-3 border-b border-border px-3 py-2">
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="Back to chat"
-                onPress={() => setOpen(false)}
-                className="min-h-11 flex-row items-center gap-1 px-2"
-              >
-                <SymbolView name="chevron.left" size={18} tintColorClassName="accent-foreground" />
-                <Text className="text-base text-foreground">Back</Text>
-              </Pressable>
-              <Text accessibilityRole="header" className="text-lg font-t3-bold text-foreground">
-                You should know
-              </Text>
-            </View>
-            <Text className="px-4 py-1 text-xs text-foreground-muted">
-              Current environment · All projects and threads
-            </Text>
-            <InboxPages
-              key={environmentId}
-              environmentId={environmentId}
-              threadId={threadId}
-              connected={connected}
-              onClose={() => setOpen(false)}
-            />
-            <Text className="border-t border-border px-4 py-3 text-xs text-foreground-muted">
-              Opening marks notices read, not resolved.
-            </Text>
-          </SafeAreaView>
+          <View className="flex-1 bg-screen">
+            <SafeAreaProvider style={{ flex: 1 }}>
+              <SafeAreaView style={{ flex: 1 }}>
+                <View className="flex-row items-center gap-3 border-b border-border px-3 py-2">
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Back to chat"
+                    onPress={() => setOpen(false)}
+                    className="min-h-11 flex-row items-center gap-1 px-2"
+                  >
+                    <SymbolView
+                      name="chevron.left"
+                      size={18}
+                      tintColorClassName="accent-foreground"
+                    />
+                    <Text className="text-base text-foreground">Back</Text>
+                  </Pressable>
+                  <Text accessibilityRole="header" className="text-lg font-t3-bold text-foreground">
+                    You should know
+                  </Text>
+                </View>
+                <Text className="px-4 py-1 text-xs text-foreground-muted">
+                  Current environment · All projects and threads
+                </Text>
+                <InboxPages
+                  key={environmentId}
+                  environmentId={environmentId}
+                  threadId={threadId}
+                  connected={connected}
+                  onClose={() => setOpen(false)}
+                />
+                <Text className="border-t border-border px-4 py-3 text-xs text-foreground-muted">
+                  Opening marks notices read, not resolved.
+                </Text>
+              </SafeAreaView>
+            </SafeAreaProvider>
+          </View>
         ) : null}
       </Modal>
     ),
@@ -186,6 +194,15 @@ function InboxPages({
     try {
       await waitForComposerDraftsLoaded();
       if (!mounted.current) return;
+      const result = await resolve({
+        environmentId,
+        input: { threadId: entry.threadId, turnItemId: entry.turnItemId, resolution: "dismiss" },
+      });
+      if (!mounted.current) return;
+      if (result._tag !== "Success") {
+        setActionError("The notice could not be updated. Try again.");
+        return;
+      }
       const draftKey = scopedThreadKey(environmentId, entry.targetThreadId);
       setComposerDraftText(
         draftKey,
@@ -381,8 +398,8 @@ function InboxPages({
                   </>
                 ) : null}
                 <Text className="text-xs text-foreground-muted">
-                  Ask agent appends to the target thread’s unsent draft. Nothing is sent or
-                  resolved.
+                  Ask agent adds the note to the target thread’s unsent draft and dismisses it from
+                  Unresolved. Nothing is sent.
                 </Text>
               </View>
             ) : null}

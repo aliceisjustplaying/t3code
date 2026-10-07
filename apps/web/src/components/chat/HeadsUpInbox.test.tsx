@@ -212,7 +212,7 @@ it("expansion still exposes explanation, evidence and Ask; disconnected quick ac
 });
 
 it.each(["unresolved", "reviewed"] as const)(
-  "Ask appends to the draft from a collapsed %s row without resolving the notice",
+  "Ask appends to the draft and dismisses a collapsed %s notice",
   async (view) => {
     const target = scopeThreadRef(environmentId, threadId);
     useComposerDraftStore.getState().setPrompt(target, "Existing draft");
@@ -226,11 +226,14 @@ it.each(["unresolved", "reviewed"] as const)(
     await render();
     await act(async () => button("Ask agent · Draft").click());
     const prompt = useComposerDraftStore.getState().getComposerDraft(target)?.prompt;
-    expect(prompt).toContain("Existing draft\n\nYou should know");
+    expect(prompt).toContain("Existing draft\n\nHere is a note offered by a side agent:");
     expect(prompt).toContain("A shared cache");
     expect(prompt).toContain("Check the cache.");
     expect(document.querySelector('button[aria-controls="ysk-notice"]')).toBeNull();
-    expect(state.resolve).not.toHaveBeenCalled();
+    expect(state.resolve).toHaveBeenCalledWith({
+      environmentId,
+      input: { threadId, turnItemId: entry.turnItemId, resolution: "dismiss" },
+    });
     expect(state.navigate).not.toHaveBeenCalled();
   },
 );
@@ -248,4 +251,23 @@ it("keeps the unresolved counter after opening and acknowledging notices", async
   expect(trigger.textContent).toContain("1");
   expect(trigger.getAttribute("aria-label")).toContain("1 unresolved");
   expect(trigger.getAttribute("aria-label")).toContain("0 unread");
+});
+
+it("Ask preserves the draft and keeps the notice open if dismissal fails, then retries once", async () => {
+  const target = scopeThreadRef(environmentId, threadId);
+  useComposerDraftStore.getState().setPrompt(target, "Existing draft");
+  await openInbox();
+  state.resolve.mockResolvedValueOnce({ _tag: "Failure" });
+  await act(async () => button("Ask agent · Draft").click());
+  expect(useComposerDraftStore.getState().getComposerDraft(target)?.prompt).toBe("Existing draft");
+  expect(document.body.textContent).toContain("The notice could not be updated. Try again.");
+  expect(button("Ask agent · Draft").disabled).toBe(false);
+  await act(async () => button("Ask agent · Draft").click());
+  expect(
+    useComposerDraftStore
+      .getState()
+      .getComposerDraft(target)
+      ?.prompt?.match(/Here is a note/g),
+  ).toHaveLength(1);
+  expect(document.querySelector('button[aria-controls="ysk-notice"]')).toBeNull();
 });

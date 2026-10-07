@@ -129,6 +129,7 @@ vi.mock("react-native", () => ({
 }));
 vi.mock("react-native-safe-area-context", () => ({
   SafeAreaView: ({ children }: { children: ReactNode }) => children,
+  SafeAreaProvider: ({ children }: { children: ReactNode }) => children,
 }));
 vi.mock("../../components/AppSymbol", () => ({ SymbolView: () => null }));
 vi.mock("../../components/AppText", () => ({
@@ -285,13 +286,16 @@ it("Collapsed Ask waits for disk hydration and appends to the latest draft witho
   });
   expect(getComposerDraftSnapshot(key)).toMatchObject({
     ...draft,
-    text: `${draft.text}\n\nYou should know from "Source" (source thread source). Follow-up for "Target" (target thread target):\nHere is a note offered by a side agent:\n> Heads up · A shared cache\n>\n> Check the cache.\n\nCan you explain the impact and suggest a fix?`,
+    text: expect.stringContaining(`${draft.text}\n\nHere is a note offered by a side agent:`),
   });
   expect(visibleWhileLoading).toBe(true);
   expect(disabledWhileLoading).toBe(true);
   expect(ui.visible).toBe(false);
   expect(ui.navigate).toHaveBeenCalledWith("Thread", { environmentId, threadId: targetThread });
-  expect(ui.command).not.toHaveBeenCalled();
+  expect(ui.command).toHaveBeenCalledWith({
+    environmentId,
+    input: { threadId: entry.threadId, turnItemId: entry.turnItemId, resolution: "dismiss" },
+  });
 });
 
 it("Ask preserves edits after hydration and keeps the inbox open when hydration fails", async () => {
@@ -306,6 +310,7 @@ it("Ask preserves edits after hydration and keeps the inbox open when hydration 
     expect(ui.errors).toContain("The draft could not be updated. Try again.");
     expect(ui.navigate).not.toHaveBeenCalled();
     expect(getComposerDraftSnapshot(key).text).toBe("");
+    expect(ui.command).not.toHaveBeenCalled();
     storage.error = null;
     await waitForComposerDraftsLoaded();
     setComposerDraftText(key, `${draft.text}\nNew edit`);
@@ -316,7 +321,10 @@ it("Ask preserves edits after hydration and keeps the inbox open when hydration 
     expect(getComposerDraftSnapshot(key).attachments).toEqual(draft.attachments);
     expect(getComposerDraftSnapshot(key).context).toEqual(draft.context);
     expect(ui.visible).toBe(false);
-    expect(ui.command).not.toHaveBeenCalled();
+    expect(ui.command).toHaveBeenCalledWith({
+      environmentId,
+      input: { threadId: entry.threadId, turnItemId: entry.turnItemId, resolution: "dismiss" },
+    });
   } finally {
     warning.mockRestore();
   }

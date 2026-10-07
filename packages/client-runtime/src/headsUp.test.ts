@@ -42,7 +42,7 @@ describe("headsUpChatMessage", () => {
   });
 });
 
-it("preserves an unsent draft verbatim while attributing a source notice to its parent follow-up", () => {
+it("preserves an unsent draft and appends the original YSK quote without routing metadata or an invented request", () => {
   const entry: HeadsUpInboxEntry = {
     id: "source-identity",
     threadId: ThreadId.make("source"),
@@ -64,11 +64,8 @@ it("preserves an unsent draft verbatim while attributing a source notice to its 
   };
   const original = "Keep this draft\n@[file:cache.ts]  ";
   const draft = appendHeadsUpFollowUp(original, entry);
-  expect(draft.startsWith(`${original}\n\n`)).toBe(true);
-  expect(draft).toContain('from "Cache review" (source thread source)');
-  expect(draft).toContain('Follow-up for "Fix caching" (target thread parent)');
-  expect(draft).toContain("> Evidence: cache.ts:12");
-  expect(draft).toContain("> The TTL is wrong.");
-  expect(appendHeadsUpFollowUp("", entry)).not.toMatch(/^\s/);
-  expect(entry.note.resolution).toBeUndefined();
+  const quote =
+    "Here is a note offered by a side agent:\n> Heads up · Stale cache\n> Evidence: cache.ts:12\n>\n> The TTL is wrong.";
+  expect(draft).toBe(`${original}\n\n${quote}`);
+  expect(appendHeadsUpFollowUp("", entry)).toBe(quote);
 });
