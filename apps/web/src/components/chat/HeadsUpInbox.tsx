@@ -298,7 +298,21 @@ function InboxPages({
                   </span>
                 ) : null}
               </div>
-              <div className="flex min-h-11 items-center gap-3" aria-busy={busy === entry.id}>
+              <div
+                className="flex min-h-11 w-full flex-wrap items-center gap-3"
+                aria-busy={busy === entry.id}
+              >
+                <Button
+                  size="sm"
+                  disabled={!connected || busy !== null}
+                  aria-label={`Ask agent · Draft: ${entry.note.line}`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    ask(entry);
+                  }}
+                >
+                  Ask agent · Draft
+                </Button>
                 {view === "reviewed" ? (
                   <Button
                     variant="outline"
@@ -373,15 +387,6 @@ function InboxPages({
                     </pre>
                   </>
                 ) : null}
-                <div className="flex flex-wrap gap-2">
-                  <Button
-                    size="sm"
-                    disabled={!connected || busy !== null}
-                    onClick={() => ask(entry)}
-                  >
-                    Ask agent · Draft
-                  </Button>
-                </div>
                 <p className="text-xs text-muted-foreground">
                   Ask agent appends to the target thread’s unsent draft. Nothing is sent or
                   resolved.

@@ -233,7 +233,6 @@ function Probe() {
 async function openNotice() {
   await act(async () => root.render(createElement(Probe)));
   await act(async () => ui.presses.get("You should know, 0 unread")!());
-  await act(async () => ui.presses.get("notice")!());
   ui.command.mockClear();
 }
 beforeEach(() => {
@@ -271,7 +270,7 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-it("Ask waits for disk hydration and appends to the latest draft without losing attachments or context", async () => {
+it("Collapsed Ask waits for disk hydration and appends to the latest draft without losing attachments or context", async () => {
   const hydration = Promise.withResolvers<void>();
   storage.barrier = hydration.promise;
   await openNotice();
@@ -340,7 +339,7 @@ it.each(["dismiss", "knew"] as const)(
     });
     expect(ui.actions.get("Dismiss")!.disabled).toBe(true);
     expect(ui.actions.get("Knew")!.disabled).toBe(true);
-    expect(ui.ask).toBeNull();
+    expect(ui.askDisabled).toBe(true);
     expect(stopPropagation).toHaveBeenCalledTimes(1);
     await act(async () => saving.resolve({ _tag: "Success" }));
     expect(ui.actions.get("Dismiss")!.disabled).toBe(false);
@@ -361,6 +360,6 @@ it("native Reviewed restores without expansion and exposes failed updates for re
     environmentId,
     input: { threadId: entry.threadId, turnItemId: entry.turnItemId, resolution: null },
   });
-  expect(ui.ask).toBeNull();
+  expect(ui.ask).not.toBeNull();
   expect(ui.navigate).not.toHaveBeenCalled();
 });

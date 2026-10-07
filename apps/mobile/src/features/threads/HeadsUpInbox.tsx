@@ -315,7 +315,16 @@ function InboxPages({
                   </Text>
                 ) : null}
               </View>
-              <View className="flex-row gap-2">
+              <View className="w-full flex-row flex-wrap gap-2">
+                <RequestActionButton
+                  label="Ask agent · Draft"
+                  accessibilityLabel={`Ask agent · Draft: ${entry.note.line}`}
+                  disabled={!connected || busy !== null}
+                  onPress={(event) => {
+                    event.stopPropagation();
+                    void ask(entry);
+                  }}
+                />
                 {view === "reviewed" ? (
                   <RequestActionButton
                     label={
@@ -382,13 +391,6 @@ function InboxPages({
                     </Text>
                   </>
                 ) : null}
-                <View className="flex-row flex-wrap gap-2">
-                  <RequestActionButton
-                    label="Ask agent · Draft"
-                    disabled={!connected || busy !== null}
-                    onPress={() => void ask(entry)}
-                  />
-                </View>
                 <Text className="text-xs text-foreground-muted">
                   Ask agent appends to the target thread’s unsent draft. Nothing is sent or
                   resolved.
