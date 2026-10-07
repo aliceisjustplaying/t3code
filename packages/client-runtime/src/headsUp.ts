@@ -43,3 +43,10 @@ export function appendHeadsUpFollowUp(draft: string, entry: HeadsUpInboxEntry): 
   const followUp = headsUpChatMessage(entry.note);
   return draft.length > 0 ? `${draft}\n\n${followUp}` : followUp;
 }
+
+export const HEADS_UP_LABEL = {
+  knew: "knew this",
+  dismiss: "dismissed",
+  learn: "explained",
+  send: "sent to agent",
+} as const;

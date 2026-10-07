@@ -4,6 +4,7 @@ import {
   type OrchestrationV2Run,
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2TurnItem,
+  EventId,
   MessageId,
   ProjectId,
   ProviderInstanceId,
@@ -398,3 +399,61 @@ it.each([undefined, ThreadId.make("child-thread")])(
     expect(next?.visibleTurnItems).toEqual(projection.visibleTurnItems);
   },
 );
+
+it("updates loaded heads-up rows through review, read and restore without changing the paged window", () => {
+  const source = ThreadId.make("child-source");
+  const providerThreadId = ProviderThreadId.make("note-provider");
+  const note: OrchestrationV2TurnItem = {
+    ...commandItem("note", "", 1),
+    providerThreadId,
+    type: "system_notice",
+    message: "Heads up",
+    headsUp: { noteId: "note", tag: "Heads up", line: "Check cache", sourceThreadId: source },
+  };
+  const unrelated = commandItem("recent", "done", 100);
+  const outsideWindow = { ...note, id: TurnItemId.make("outside-window") };
+  const visibleOnly = { ...note, id: TurnItemId.make("inherited-note") };
+  const rows = [unrelated, note, visibleOnly].map((item, position) => ({
+    position: position + 40,
+    visibility: position === 2 ? ("inherited" as const) : ("local" as const),
+    sourceThreadId: position === 2 ? source : threadId,
+    sourceItemId: item.id,
+    item,
+  }));
+  let projection: OrchestrationV2ThreadProjection = {
+    ...emptyProjection,
+    turnItems: [note, outsideWindow, unrelated],
+    visibleTurnItems: rows,
+  };
+  const readAt = "2026-06-20T01:00:00.000Z";
+  for (const patch of [{ resolution: "knew" as const }, { readAt }, { resolution: null }]) {
+    projection = applyOrchestrationV2ProjectionEvent(
+      projection,
+      {
+        id: EventId.make("note-update"),
+        type: "thread.heads-up.updated",
+        threadId,
+        occurredAt: now,
+        payload: { sourceThreadId: source, providerThreadId, noteId: "note", ...patch },
+      } satisfies OrchestrationV2DomainEvent,
+      { partialTimeline: true, latestLocalTurnOrdinal: 100 },
+    )!;
+    const expected =
+      "resolution" in patch && patch.resolution === null
+        ? { ...note.headsUp, readAt }
+        : { ...note.headsUp, resolution: "knew", ...("readAt" in patch ? { readAt } : {}) };
+    for (const item of [
+      projection.turnItems[0],
+      projection.turnItems[1],
+      ...projection.visibleTurnItems.slice(1).map((row) => row.item),
+    ]) {
+      expect(item).toMatchObject({ headsUp: expected });
+      if (patch.resolution === null) expect(item).not.toHaveProperty("headsUp.resolution");
+    }
+    expect(projection.visibleTurnItems.map(({ item, ...row }) => row)).toEqual(
+      rows.map(({ item, ...row }) => row),
+    );
+    expect(projection.visibleTurnItems[0]).toBe(rows[0]);
+    expect(projection.turnItems[2]).toBe(unrelated);
+  }
+});

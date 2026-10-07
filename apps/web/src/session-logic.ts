@@ -1,3 +1,4 @@
+import { HEADS_UP_LABEL } from "@t3tools/client-runtime/heads-up";
 import { resolveThreadWorkingStartedAt } from "@t3tools/client-runtime/state/models";
 import {
   type AssetResource,
@@ -172,13 +173,6 @@ export type TimelineEntry = (
   /** V2 identity resolved from the item's execution node, when locally available. */
   readonly attempt?: TimelineAttempt;
 };
-
-const HEADS_UP_LABEL = {
-  knew: "knew this",
-  dismiss: "dismissed",
-  learn: "explained",
-  send: "sent to agent",
-} as const;
 
 export function workLogEntryIsToolLike(entry: WorkLogEntry): boolean {
   return (

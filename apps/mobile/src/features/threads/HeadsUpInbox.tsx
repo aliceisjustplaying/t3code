@@ -13,6 +13,7 @@ import { useEffect, useRef, useState } from "react";
 import { Modal, Pressable, ScrollView, View } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 
+import { MarkdownContent } from "../../components/MarkdownContent";
 import { AppText as Text } from "../../components/AppText";
 import { SymbolView } from "../../components/AppSymbol";
 import { environmentCatalog } from "../../connection/catalog";
@@ -27,7 +28,11 @@ import {
 } from "../../state/use-composer-drafts";
 import { RequestActionButton } from "./RequestActionButton";
 
-export function useHeadsUpInbox(environmentId: EnvironmentId, threadId: ThreadId) {
+export function useHeadsUpInbox(
+  environmentId: EnvironmentId,
+  threadId: ThreadId,
+  onDraftReady: () => void,
+) {
   const [open, setOpen] = useState(false);
   const summary = useEnvironmentQuery(headsUpInbox.summary({ environmentId, input: {} }));
   const connection = useAtomValue(environmentCatalog.stateAtom(environmentId));
@@ -90,6 +95,7 @@ export function useHeadsUpInbox(environmentId: EnvironmentId, threadId: ThreadId
                   threadId={threadId}
                   connected={connected}
                   onClose={() => setOpen(false)}
+                  onDraftReady={onDraftReady}
                 />
                 <Text className="border-t border-border px-4 py-3 text-xs text-foreground-muted">
                   Opening marks notices read, not resolved.
@@ -108,11 +114,13 @@ function InboxPages({
   threadId,
   connected,
   onClose,
+  onDraftReady,
 }: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly connected: boolean;
   readonly onClose: () => void;
+  readonly onDraftReady: () => void;
 }) {
   const [view, setView] = useState<HeadsUpInboxInput["view"]>("unresolved");
   const [cursor, setCursor] = useState<string | undefined>();
@@ -208,6 +216,7 @@ function InboxPages({
         draftKey,
         appendHeadsUpFollowUp(getComposerDraftSnapshot(draftKey).text, entry),
       );
+      onDraftReady();
       onClose();
       if (threadId !== entry.targetThreadId)
         navigation.navigate("Thread", { environmentId, threadId: entry.targetThreadId });
@@ -379,9 +388,9 @@ function InboxPages({
             </View>
             {expanded === entry.id ? (
               <View className="gap-2 bg-subtle px-4 py-2">
-                <Text selectable className="text-sm text-foreground">
-                  {entry.note.explanation ?? "No additional explanation was supplied."}
-                </Text>
+                <MarkdownContent
+                  markdown={entry.note.explanation ?? "No additional explanation was supplied."}
+                />
                 <Text className="text-xs text-foreground-muted">
                   Source: {entry.sourceThreadTitle}
                   {"\n"}Draft target: {entry.targetThreadTitle}

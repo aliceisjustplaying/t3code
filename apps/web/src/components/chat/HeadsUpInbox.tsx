@@ -27,9 +27,11 @@ import { SheetBackdrop } from "../ui/sheet";
 export function HeadsUpInbox({
   environmentId,
   threadId,
+  onDraftReady,
 }: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
+  readonly onDraftReady: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [chatColumn, setChatColumn] = useState<HTMLElement | null>(null);
@@ -89,6 +91,7 @@ export function HeadsUpInbox({
                 threadId={threadId}
                 connected={connected}
                 onClose={() => setOpen(false)}
+                onDraftReady={onDraftReady}
               />
               <p className="border-t border-border px-4 py-3 text-xs text-muted-foreground">
                 Opening marks notices read, not resolved.
@@ -106,9 +109,11 @@ function InboxPages({
   threadId,
   connected,
   onClose,
+  onDraftReady,
 }: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
+  readonly onDraftReady: () => void;
   readonly connected: boolean;
   readonly onClose: () => void;
 }) {
@@ -205,6 +210,7 @@ function InboxPages({
         target,
         appendHeadsUpFollowUp(store.getComposerDraft(target)?.prompt ?? "", entry),
       );
+      onDraftReady();
       onClose();
       if (threadId !== entry.targetThreadId)
         void navigate({ to: "/$environmentId/$threadId", params: buildThreadRouteParams(target) });

@@ -22,6 +22,8 @@ const ui = vi.hoisted(() => ({
   visible: false,
   errors: [] as ReactNode[],
   navigate: vi.fn(),
+  draftReady: vi.fn(),
+  threadId: "current",
   command: vi.fn(async (_input: unknown) => ({ _tag: "Success" })),
 }));
 const storage = vi.hoisted(() => ({
@@ -131,6 +133,7 @@ vi.mock("react-native-safe-area-context", () => ({
   SafeAreaView: ({ children }: { children: ReactNode }) => children,
   SafeAreaProvider: ({ children }: { children: ReactNode }) => children,
 }));
+vi.mock("../../components/MarkdownContent", () => ({ MarkdownContent: () => null }));
 vi.mock("../../components/AppSymbol", () => ({ SymbolView: () => null }));
 vi.mock("../../components/AppText", () => ({
   AppText: ({
@@ -174,7 +177,6 @@ import {
 import { useHeadsUpInbox } from "./HeadsUpInbox";
 
 const environmentId = EnvironmentId.make("environment");
-const currentThread = ThreadId.make("current");
 const targetThread = ThreadId.make("target");
 const key = "environment:target";
 const entry: HeadsUpInboxEntry = {
@@ -223,7 +225,7 @@ const draft = {
 };
 let root: Root;
 function Probe() {
-  const inbox = useHeadsUpInbox(environmentId, currentThread);
+  const inbox = useHeadsUpInbox(environmentId, ThreadId.make(ui.threadId), ui.draftReady);
   return (
     <>
       {inbox.button}
@@ -248,6 +250,8 @@ beforeEach(() => {
   ui.ask = null;
   ui.errors = [];
   ui.navigate.mockClear();
+  ui.draftReady.mockReset();
+  ui.threadId = "current";
   ui.command.mockReset().mockResolvedValue({ _tag: "Success" });
   const document = { nodeType: 9, addEventListener() {}, removeEventListener() {} };
   const container = {
@@ -369,5 +373,34 @@ it("native Reviewed restores without expansion and exposes failed updates for re
     input: { threadId: entry.threadId, turnItemId: entry.turnItemId, resolution: null },
   });
   expect(ui.ask).not.toBeNull();
+  expect(ui.navigate).not.toHaveBeenCalled();
+});
+
+it("same-thread Ask reveals the prepared draft only after dismissal succeeds, preserving the view on failure", async () => {
+  ui.threadId = targetThread;
+  ui.draftReady.mockImplementation(() => {
+    expect(getComposerDraftSnapshot(key)).toMatchObject({
+      ...draft,
+      text: expect.stringContaining(draft.text + "\n\nHere is a note"),
+    });
+  });
+  await openNotice();
+  const saving = Promise.withResolvers<{ _tag: string }>();
+  ui.command.mockReturnValueOnce(saving.promise);
+  await act(async () => {
+    ui.ask!();
+  });
+  expect(ui.draftReady).not.toHaveBeenCalled();
+  expect(ui.visible).toBe(true);
+  expect(getComposerDraftSnapshot(key)).toMatchObject(draft);
+  await act(async () => saving.resolve({ _tag: "Failure" }));
+  expect(ui.draftReady).not.toHaveBeenCalled();
+  expect(ui.visible).toBe(true);
+  expect(getComposerDraftSnapshot(key)).toMatchObject(draft);
+  await act(async () => {
+    ui.ask!();
+  });
+  expect(ui.draftReady).toHaveBeenCalledTimes(1);
+  expect(ui.visible).toBe(false);
   expect(ui.navigate).not.toHaveBeenCalled();
 });

@@ -105,12 +105,13 @@ function ThreadHeader(
     readonly onToggleInspector: () => void;
     readonly onOpenGitInspector: () => void;
     readonly onOpenFilesInspector: () => void;
+    readonly onDraftReady: () => void;
   },
 ) {
   const navigation = useNavigation();
   const { layout, panes, toggleAuxiliaryPane } = useAdaptiveWorkspaceLayout();
   const { onOpenTerminal, onMergeBack } = props.gitControls;
-  const inbox = useHeadsUpInbox(props.environmentId, props.threadId);
+  const inbox = useHeadsUpInbox(props.environmentId, props.threadId, props.onDraftReady);
   const native = useThreadHeaderOptions({ ...props, headsUpInboxButton: inbox.button });
   const androidHeaderActions = useMemo<ReadonlyArray<ScreenHeaderAction>>(() => {
     const actions: ScreenHeaderAction[] = [];
@@ -367,6 +368,7 @@ function ThreadRouteContent(
   const selectedThreadDetailState = props.selectedThreadDetailState;
   const selectedThreadDetail = Option.getOrNull(selectedThreadDetailState.data);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
+  const handleHeadsUpDraftReady = useCallback(() => setSelectedJobId(null), []);
   const jobs = threadJobs(selectedThreadDetail?.turnItems ?? []);
   const selectedJob = jobs.find((job) => job.turnItemId === selectedJobId);
   const jobMenuItem = (job: (typeof jobs)[number]) => ({
@@ -1202,6 +1204,7 @@ function ThreadRouteContent(
         onToggleInspector={handleToggleInspector}
         onOpenGitInspector={handleOpenGitInspector}
         onOpenFilesInspector={handleOpenFilesInspector}
+        onDraftReady={handleHeadsUpDraftReady}
         onReturnToThread={props.onReturnToThread}
       />
 

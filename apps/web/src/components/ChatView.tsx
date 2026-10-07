@@ -1861,6 +1861,7 @@ export default function ChatView(props: ChatViewProps) {
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const [isWorkspaceFileDragActive, setIsWorkspaceFileDragActive] = useState(false);
   const [selectedJob, setSelectedJob] = useState<{ threadId: string; itemId: TurnItemId } | null>(null);
+  const handleHeadsUpDraftReady = useCallback(() => setSelectedJob(null), []);
   const [expandedImage, setExpandedImage] = useState<ExpandedImagePreview | null>(null);
   useEffect(() => {
     const item = expandedImage?.images[expandedImage.index];
@@ -11243,6 +11244,7 @@ export default function ChatView(props: ChatViewProps) {
             activeProject={activeProject ?? null}
             rightPanelOpen={inlineRightPanelOwnsTitleBar}
             onNewThreadInProject={handleNewThreadInActiveProject}
+            onDraftReady={handleHeadsUpDraftReady}
             {...(activeDraftLogicalProjectKey
               ? { onOpenProjectSettings: handleOpenDraftProjectSettings }
               : {})}
