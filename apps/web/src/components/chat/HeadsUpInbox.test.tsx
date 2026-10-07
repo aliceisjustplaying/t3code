@@ -14,6 +14,7 @@ const state = vi.hoisted(() => ({
   resolve: vi.fn(async (_input: unknown) => ({ _tag: "Success" })),
   refresh: vi.fn(),
   navigate: vi.fn(),
+  draftReady: vi.fn(),
 }));
 vi.mock("@effect/atom-react", () => ({
   useAtomValue: () => AsyncResult.success({ phase: state.connected ? "connected" : "offline" }),
@@ -87,7 +88,13 @@ let root: Root;
 let container: HTMLElement;
 const render = async () => {
   await act(async () =>
-    root.render(<HeadsUpInbox environmentId={environmentId} threadId={threadId} />),
+    root.render(
+      <HeadsUpInbox
+        environmentId={environmentId}
+        threadId={threadId}
+        onDraftReady={state.draftReady}
+      />,
+    ),
   );
 };
 const button = (text: string) => {
@@ -112,6 +119,7 @@ beforeEach(() => {
   state.resolve.mockReset().mockResolvedValue({ _tag: "Success" });
   state.refresh.mockClear();
   state.navigate.mockClear();
+  state.draftReady.mockReset();
   useComposerDraftStore.getState().clearComposerContent(scopeThreadRef(environmentId, threadId));
   container = document.createElement("div");
   document.body.appendChild(container);
@@ -257,8 +265,21 @@ it("Ask preserves the draft and keeps the notice open if dismissal fails, then r
   const target = scopeThreadRef(environmentId, threadId);
   useComposerDraftStore.getState().setPrompt(target, "Existing draft");
   await openInbox();
-  state.resolve.mockResolvedValueOnce({ _tag: "Failure" });
+  state.draftReady.mockImplementation(() => {
+    expect(useComposerDraftStore.getState().getComposerDraft(target)?.prompt).toContain(
+      "Existing draft\n\nHere is a note",
+    );
+  });
+  let finishSave!: (result: { _tag: string }) => void;
+  const saving = new Promise<{ _tag: string }>((resolve) => {
+    finishSave = resolve;
+  });
+  state.resolve.mockReturnValueOnce(saving);
   await act(async () => button("Ask agent · Draft").click());
+  expect(state.draftReady).not.toHaveBeenCalled();
+  expect(useComposerDraftStore.getState().getComposerDraft(target)?.prompt).toBe("Existing draft");
+  await act(async () => finishSave({ _tag: "Failure" }));
+  expect(state.draftReady).not.toHaveBeenCalled();
   expect(useComposerDraftStore.getState().getComposerDraft(target)?.prompt).toBe("Existing draft");
   expect(document.body.textContent).toContain("The notice could not be updated. Try again.");
   expect(button("Ask agent · Draft").disabled).toBe(false);
@@ -269,5 +290,6 @@ it("Ask preserves the draft and keeps the notice open if dismissal fails, then r
       .getComposerDraft(target)
       ?.prompt?.match(/Here is a note/g),
   ).toHaveLength(1);
+  expect(state.draftReady).toHaveBeenCalledTimes(1);
   expect(document.querySelector('button[aria-controls="ysk-notice"]')).toBeNull();
 });

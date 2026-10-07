@@ -248,6 +248,7 @@ function ThreadRouteContent(
   const selectedThreadDetailState = props.selectedThreadDetailState;
   const selectedThreadDetail = Option.getOrNull(selectedThreadDetailState.data);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
+  const handleHeadsUpDraftReady = useCallback(() => setSelectedJobId(null), []);
   const jobs = threadJobs(selectedThreadDetail?.turnItems ?? []);
   const selectedJob = jobs.find((job) => job.turnItemId === selectedJobId);
   const jobMenuItem = (job: (typeof jobs)[number]) => ({
@@ -1083,6 +1084,7 @@ function ThreadRouteContent(
         onToggleInspector={handleToggleInspector}
         onOpenGitInspector={handleOpenGitInspector}
         onOpenFilesInspector={handleOpenFilesInspector}
+        onDraftReady={handleHeadsUpDraftReady}
         onReturnToThread={props.onReturnToThread}
       />
 

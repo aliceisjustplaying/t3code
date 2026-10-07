@@ -1,3 +1,4 @@
+import { HEADS_UP_LABEL } from "@t3tools/client-runtime/heads-up";
 import type {
   ThreadPendingApproval,
   ThreadPendingUserInput,
@@ -590,7 +591,11 @@ function itemSummary(
   toolPresentation: T3McpToolPresentation | null = null,
 ): string {
   if (item.type === "notification") return item.summary;
-  if (item.type === "system_notice") return item.message;
+  if (item.type === "system_notice") {
+    return item.headsUp?.resolution === undefined
+      ? item.message
+      : `✦ ${item.headsUp.tag} · ${item.headsUp.line} (${HEADS_UP_LABEL[item.headsUp.resolution]})`;
+  }
   if (item.type === "compaction") return contextCompactionLabel(item);
   const title =
     (item.type === "dynamic_tool" ? dynamicToolTitle(item.toolName, item.input) : undefined) ??
@@ -1755,6 +1760,8 @@ export function buildThreadFeed(
     const item = row.item;
     if (turnItemIsWorkspacePreparation(item)) continue;
     if (item.type === "system_notice" && item.job) continue;
+    if (item.type === "system_notice" && item.headsUp && item.headsUp.resolution === undefined)
+      continue;
     if (item.type === "todo_list" || item.type === "checkpoint") continue;
     if (item.type === "user_message" && foldedAnswerMessageIds.has(item.messageId)) continue;
     // Match the web timeline: only the terminal interrupt result is useful to

@@ -48,6 +48,7 @@ interface ChatHeaderProps {
   activeProject: EnvironmentProject | null;
   rightPanelOpen: boolean;
   onNewThreadInProject: () => void;
+  onDraftReady: () => void;
   onOpenProjectSettings?: (() => void) | undefined;
 }
 
@@ -80,6 +81,7 @@ export const ChatHeader = memo(function ChatHeader({
   activeProject,
   rightPanelOpen,
   onNewThreadInProject,
+  onDraftReady,
   onOpenProjectSettings,
 }: ChatHeaderProps) {
   const activeProjectName = activeProject?.title;
@@ -360,6 +362,7 @@ export const ChatHeader = memo(function ChatHeader({
         key={activeThreadEnvironmentId}
         environmentId={activeThreadEnvironmentId}
         threadId={activeThreadId}
+        onDraftReady={onDraftReady}
       />
     </div>
   );

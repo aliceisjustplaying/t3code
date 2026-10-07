@@ -248,31 +248,37 @@ export function applyOrchestrationV2ProjectionEvent(
       return { ...base, messages: upsertEntity(base.messages, event.payload) };
     case "plan.updated":
       return { ...base, plans: upsertEntity(base.plans, event.payload) };
-    case "thread.heads-up.updated":
+    case "thread.heads-up.updated": {
+      const updateNote = (item: OrchestrationV2TurnItem): OrchestrationV2TurnItem => {
+        if (
+          item.type !== "system_notice" ||
+          item.headsUp === undefined ||
+          (item.headsUp.sourceThreadId ?? item.threadId) !== event.payload.sourceThreadId ||
+          item.providerThreadId !== event.payload.providerThreadId ||
+          item.headsUp.noteId !== event.payload.noteId
+        )
+          return item;
+        const { resolution: previous, ...note } = item.headsUp;
+        const resolution =
+          event.payload.resolution === undefined ? previous : event.payload.resolution;
+        return {
+          ...item,
+          headsUp: {
+            ...note,
+            ...(event.payload.readAt === undefined ? {} : { readAt: event.payload.readAt }),
+            ...(resolution == null ? {} : { resolution }),
+          },
+        };
+      };
       return {
         ...base,
-        turnItems: base.turnItems.map((item) => {
-          if (
-            item.type !== "system_notice" ||
-            item.headsUp === undefined ||
-            (item.headsUp.sourceThreadId ?? item.threadId) !== event.payload.sourceThreadId ||
-            item.providerThreadId !== event.payload.providerThreadId ||
-            item.headsUp.noteId !== event.payload.noteId
-          )
-            return item;
-          const { resolution: previous, ...note } = item.headsUp;
-          const resolution =
-            event.payload.resolution === undefined ? previous : event.payload.resolution;
-          return {
-            ...item,
-            headsUp: {
-              ...note,
-              ...(event.payload.readAt === undefined ? {} : { readAt: event.payload.readAt }),
-              ...(resolution == null ? {} : { resolution }),
-            },
-          };
+        turnItems: base.turnItems.map(updateNote),
+        visibleTurnItems: base.visibleTurnItems.map((row) => {
+          const item = updateNote(row.item);
+          return item === row.item ? row : { ...row, item };
         }),
       };
+    }
     case "turn-item.updated": {
       // Jobs remain chat controls. Heads-ups use the environment inbox query.
       if (

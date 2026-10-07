@@ -2573,3 +2573,46 @@ describe("MCP apps", () => {
     expect(feed("running").some((candidate) => candidate.type === "mcp-app")).toBe(false);
   });
 });
+
+it("keeps unresolved notes in the inbox and labels reviewed notes in the mobile transcript", () => {
+  const notice = (
+    id: string,
+    resolution?: "dismiss" | "knew" | "learn" | "send",
+  ): OrchestrationV2TurnItem => ({
+    ...base(id, "2026-06-20T00:00:01.000Z", 1),
+    type: "system_notice",
+    message: "[ysk:note] Heads up · Check cache",
+    headsUp: {
+      noteId: id,
+      tag: "Heads up",
+      line: "Check cache",
+      ...(resolution ? { resolution } : {}),
+    },
+  });
+  const ordinary: OrchestrationV2TurnItem = {
+    ...base("ordinary", "2026-06-20T00:00:01.000Z", 1),
+    type: "system_notice",
+    message: "Ordinary warning",
+  };
+  const feed = buildThreadFeed(
+    [
+      notice("open"),
+      notice("dismissed", "dismiss"),
+      notice("known", "knew"),
+      notice("explained", "learn"),
+      notice("sent", "send"),
+      ordinary,
+    ].map((item, position) => projected(item, position)),
+  );
+  expect(
+    feed.flatMap((entry) =>
+      entry.type === "activity-group" ? entry.activities.map((activity) => activity.summary) : [],
+    ),
+  ).toEqual([
+    "✦ Heads up · Check cache (dismissed)",
+    "✦ Heads up · Check cache (knew this)",
+    "✦ Heads up · Check cache (explained)",
+    "✦ Heads up · Check cache (sent to agent)",
+    "Ordinary warning",
+  ]);
+});

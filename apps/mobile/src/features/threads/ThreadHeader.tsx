@@ -21,12 +21,13 @@ export function ThreadHeader(
     readonly onToggleInspector: () => void;
     readonly onOpenGitInspector: () => void;
     readonly onOpenFilesInspector: () => void;
+    readonly onDraftReady: () => void;
   },
 ) {
   const navigation = useNavigation();
   const { layout, panes, toggleAuxiliaryPane } = useAdaptiveWorkspaceLayout();
   const { onOpenTerminal, onMergeBack } = props.gitControls;
-  const inbox = useHeadsUpInbox(props.environmentId, props.threadId);
+  const inbox = useHeadsUpInbox(props.environmentId, props.threadId, props.onDraftReady);
   const native = useThreadHeaderOptions({ ...props, headsUpInboxButton: inbox.button });
   const androidHeaderActions = useMemo<ReadonlyArray<ScreenHeaderAction>>(() => {
     const actions: ScreenHeaderAction[] = [];
