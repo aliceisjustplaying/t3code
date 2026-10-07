@@ -13,6 +13,7 @@ const state = vi.hoisted(() => ({
   read: vi.fn(async () => ({ _tag: "Success" })),
   resolve: vi.fn(async (_input: unknown) => ({ _tag: "Success" })),
   refresh: vi.fn(),
+  navigate: vi.fn(),
 }));
 vi.mock("@effect/atom-react", () => ({
   useAtomValue: () => AsyncResult.success({ phase: state.connected ? "connected" : "offline" }),
@@ -55,9 +56,11 @@ vi.mock("../../state/query", () => ({
     refresh: state.refresh,
   }),
 }));
-vi.mock("@tanstack/react-router", () => ({ useNavigate: () => vi.fn() }));
+vi.mock("@tanstack/react-router", () => ({ useNavigate: () => state.navigate }));
 vi.mock("../ChatMarkdown", () => ({ default: ({ text }: { text: string }) => <p>{text}</p> }));
 import { HeadsUpInbox } from "./HeadsUpInbox";
+import { useComposerDraftStore } from "../../composerDraftStore";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 
 const environmentId = EnvironmentId.make("environment");
 const threadId = ThreadId.make("source");
@@ -108,6 +111,8 @@ beforeEach(() => {
   state.read.mockClear();
   state.resolve.mockReset().mockResolvedValue({ _tag: "Success" });
   state.refresh.mockClear();
+  state.navigate.mockClear();
+  useComposerDraftStore.getState().clearComposerContent(scopeThreadRef(environmentId, threadId));
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -205,3 +210,27 @@ it("expansion still exposes explanation, evidence and Ask; disconnected quick ac
   expect(button("Knew").disabled).toBe(true);
   expect(button("Ask agent · Draft").disabled).toBe(true);
 });
+
+it.each(["unresolved", "reviewed"] as const)(
+  "Ask appends to the draft from a collapsed %s row without resolving the notice",
+  async (view) => {
+    const target = scopeThreadRef(environmentId, threadId);
+    useComposerDraftStore.getState().setPrompt(target, "Existing draft");
+    await openInbox();
+    if (view === "reviewed") await act(async () => button("reviewed (1)").click());
+    expect(document.body.textContent).not.toContain("Check the cache.");
+    state.connected = false;
+    await render();
+    expect(button("Ask agent · Draft").disabled).toBe(true);
+    state.connected = true;
+    await render();
+    await act(async () => button("Ask agent · Draft").click());
+    const prompt = useComposerDraftStore.getState().getComposerDraft(target)?.prompt;
+    expect(prompt).toContain("Existing draft\n\nYou should know");
+    expect(prompt).toContain("A shared cache");
+    expect(prompt).toContain("Check the cache.");
+    expect(document.querySelector('button[aria-controls="ysk-notice"]')).toBeNull();
+    expect(state.resolve).not.toHaveBeenCalled();
+    expect(state.navigate).not.toHaveBeenCalled();
+  },
+);
