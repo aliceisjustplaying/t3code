@@ -1892,10 +1892,7 @@ const layerWsRpc = (
                 }),
             ),
           ),
-        [ORCHESTRATION_V2_WS_METHODS.getHeadsUpInbox]: (input) =>
-          observeRpcEffect(ORCHESTRATION_V2_WS_METHODS.getHeadsUpInbox, headsUpInbox.list(input), {
-            "rpc.aggregate": "orchestration",
-          }),
+        [ORCHESTRATION_V2_WS_METHODS.getHeadsUpInbox]: (input) => headsUpInbox.list(input),
         [ORCHESTRATION_V2_WS_METHODS.subscribeHeadsUpInbox]: (_input) => headsUpInbox.subscribe,
         [ORCHESTRATION_V2_WS_METHODS.searchThreads]: (input) =>
           threadSearch.search(input).pipe(
