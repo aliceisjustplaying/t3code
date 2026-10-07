@@ -22,7 +22,7 @@ import { useEnvironmentQuery } from "../../state/query";
 import { useAtomCommand } from "../../state/use-atom-command";
 import ChatMarkdown from "../ChatMarkdown";
 import { Button } from "../ui/button";
-import { SheetBackdrop, SheetDescription, SheetHeader, SheetTitle } from "../ui/sheet";
+import { SheetBackdrop } from "../ui/sheet";
 
 export function HeadsUpInbox({
   environmentId,
@@ -66,10 +66,10 @@ export function HeadsUpInbox({
       </Dialog.Trigger>
       {open ? (
         <Dialog.Portal container={chatColumn ?? undefined}>
-          <SheetBackdrop className="sm:absolute sm:top-(--workspace-topbar-height)" />
-          <Dialog.Viewport className="fixed inset-0 z-(--z-sheet) flex justify-end sm:absolute sm:top-(--workspace-topbar-height)">
+          <SheetBackdrop className="z-60 sm:absolute sm:top-(--workspace-topbar-height) sm:z-(--z-sheet)" />
+          <Dialog.Viewport className="fixed inset-0 z-60 flex justify-end sm:absolute sm:top-(--workspace-topbar-height) sm:z-(--z-sheet)">
             <Dialog.Popup className="flex h-full w-full min-w-0 flex-col overflow-hidden border-l border-border bg-popover text-popover-foreground shadow-lg sm:max-w-[450px]">
-              <SheetHeader>
+              <div className="flex flex-col gap-1 px-4 py-3 sm:gap-2 sm:p-6">
                 <div className="flex items-center gap-3">
                   <Dialog.Close
                     render={<Button variant="ghost" size="sm" aria-label="Back to chat" />}
@@ -78,10 +78,14 @@ export function HeadsUpInbox({
                     <span className="sm:hidden">Back</span>
                     <XIcon className="hidden sm:block" aria-hidden="true" />
                   </Dialog.Close>
-                  <SheetTitle>You should know</SheetTitle>
+                  <Dialog.Title className="text-base font-semibold sm:text-xl">
+                    You should know
+                  </Dialog.Title>
                 </div>
-                <SheetDescription>Current environment · All projects and threads</SheetDescription>
-              </SheetHeader>
+                <Dialog.Description className="text-xs text-muted-foreground sm:text-sm">
+                  Current environment · All projects and threads
+                </Dialog.Description>
+              </div>
               <InboxPages
                 environmentId={environmentId}
                 threadId={threadId}
@@ -261,7 +265,7 @@ function InboxPages({
               aria-expanded={expanded === entry.id}
               aria-controls={`ysk-${entry.id}`}
               onClick={() => setExpanded(expanded === entry.id ? null : entry.id)}
-              className="block w-full px-4 py-3 text-left hover:bg-muted/50 focus-visible:outline-2 focus-visible:outline-ring aria-expanded:bg-muted/50"
+              className="block w-full px-4 py-2 text-left sm:py-3 hover:bg-muted/50 focus-visible:outline-2 focus-visible:outline-ring aria-expanded:bg-muted/50"
             >
               <span className="flex flex-wrap justify-between gap-3 text-xs text-muted-foreground">
                 <span>
@@ -270,11 +274,17 @@ function InboxPages({
                 </span>
                 <time dateTime={entry.createdAt}>{new Date(entry.createdAt).toLocaleString()}</time>
               </span>
-              <span className="mt-1 block text-sm font-medium">{entry.note.line}</span>
+              <span
+                className={`mt-1 text-sm font-medium ${expanded === entry.id ? "block" : "line-clamp-2 sm:line-clamp-none"}`}
+              >
+                {entry.note.line}
+              </span>
             </button>
             <div className="flex flex-wrap items-center gap-x-3 px-4 pb-2">
               <div className="min-w-0 flex-1 break-words">
-                <span className="block text-xs text-muted-foreground">
+                <span
+                  className={`block text-xs text-muted-foreground ${expanded === entry.id ? "" : "max-sm:truncate"}`}
+                >
                   From {entry.sourceThreadTitle}
                 </span>
                 {entry.note.resolution ? (

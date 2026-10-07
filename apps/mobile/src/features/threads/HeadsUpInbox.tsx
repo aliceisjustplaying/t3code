@@ -71,11 +71,11 @@ export function useHeadsUpInbox(environmentId: EnvironmentId, threadId: ThreadId
                 <SymbolView name="chevron.left" size={18} tintColorClassName="accent-foreground" />
                 <Text className="text-base text-foreground">Back</Text>
               </Pressable>
-              <Text accessibilityRole="header" className="text-lg font-t3-bold text-foreground">
+              <Text accessibilityRole="header" className="text-base font-t3-bold text-foreground">
                 You should know
               </Text>
             </View>
-            <Text className="px-4 py-3 text-xs text-foreground-muted">
+            <Text className="px-4 py-1 text-xs text-foreground-muted">
               Current environment · All projects and threads
             </Text>
             <InboxPages
@@ -268,7 +268,7 @@ function InboxPages({
               accessibilityRole="button"
               accessibilityState={{ expanded: expanded === entry.id }}
               onPress={() => setExpanded(expanded === entry.id ? null : entry.id)}
-              className={`gap-1 px-4 py-3 ${expanded === entry.id ? "bg-subtle" : ""}`}
+              className={`gap-1 px-4 py-2 ${expanded === entry.id ? "bg-subtle" : ""}`}
             >
               <View className="flex-row justify-between gap-3">
                 <Text className="text-xs text-foreground-muted">
@@ -279,11 +279,19 @@ function InboxPages({
                   {new Date(entry.createdAt).toLocaleString()}
                 </Text>
               </View>
-              <Text className="text-sm font-t3-bold text-foreground">{entry.note.line}</Text>
+              <Text
+                numberOfLines={expanded === entry.id ? undefined : 2}
+                className="text-sm font-t3-bold text-foreground"
+              >
+                {entry.note.line}
+              </Text>
             </Pressable>
-            <View className="flex-row flex-wrap items-center gap-3 px-4 pb-2">
+            <View className="flex-row flex-wrap items-center gap-1 px-4 pb-2">
               <View className="min-w-0 flex-1">
-                <Text className="text-xs text-foreground-muted">
+                <Text
+                  numberOfLines={expanded === entry.id ? undefined : 1}
+                  className="text-xs text-foreground-muted"
+                >
                   From {entry.sourceThreadTitle}
                 </Text>
                 {entry.note.resolution ? (
