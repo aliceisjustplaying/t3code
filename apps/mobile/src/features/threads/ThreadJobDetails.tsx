@@ -26,7 +26,7 @@ export function ThreadJobDetails(props: {
   return (
     <ScrollView
       className="flex-1 bg-screen"
-      contentContainerClassName="p-5 gap-4"
+      contentContainerClassName="px-3 py-2 gap-2"
       contentInsetAdjustmentBehavior="automatic"
     >
       <Pressable
@@ -84,7 +84,7 @@ export function ThreadJobDetails(props: {
       )}
       <Text className="text-xs text-foreground-muted">{job.cwd}</Text>
       <Text>Output · last 16,000 characters</Text>
-      <View className="rounded-lg bg-surface p-4">
+      <View className="rounded-lg bg-surface p-2">
         <Text selectable className="font-mono text-xs">
           $ {job.command}
           {"\n\n"}

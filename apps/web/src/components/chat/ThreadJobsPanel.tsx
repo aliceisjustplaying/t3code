@@ -100,13 +100,13 @@ export function ThreadJobDetails(props: Target & { itemId: TurnItemId; onClose: 
   return (
     <div className="absolute inset-0 overflow-y-auto bg-background" aria-label="Job details">
       <div className="chat-composer-lane w-full">
-        <div className="mx-auto max-w-(--chat-content-max-width) px-5 py-8">
+        <div className="mx-auto max-w-(--chat-content-max-width) px-3 py-2">
           <Button variant="ghost" onClick={props.onClose}>
             ← Back to thread
           </Button>
           {job ? (
             <>
-              <p className="mt-6 text-xs text-muted-foreground">Jobs / Details</p>
+              <p className="mt-2 text-xs text-muted-foreground">Jobs / Details</p>
               <div className="mt-2 flex items-center justify-between gap-3">
                 <h2 className="text-xl font-semibold">{job.name}</h2>
                 {job.state === "running" && (
@@ -115,7 +115,7 @@ export function ThreadJobDetails(props: Target & { itemId: TurnItemId; onClose: 
                   </Button>
                 )}
               </div>
-              <dl className="my-6 grid grid-cols-2 gap-5 border-y border-border py-5 text-sm">
+              <dl className="my-3 grid grid-cols-2 gap-x-3 gap-y-2 border-y border-border py-2 text-sm">
                 <div>
                   <dt className="text-xs text-muted-foreground">Status</dt>
                   <dd role="status">{jobStateLabel[job.state]}</dd>
@@ -145,7 +145,7 @@ export function ThreadJobDetails(props: Target & { itemId: TurnItemId; onClose: 
                 <h3>Output</h3>
                 <span className="text-muted-foreground">Last 16,000 characters</span>
               </div>
-              <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border bg-muted/40 p-4 text-xs">
+              <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border bg-muted/40 p-2 text-xs">
                 $ {job.command}
                 {"\n\n"}
                 {job.output || "(no output yet)"}
