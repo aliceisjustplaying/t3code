@@ -6,6 +6,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderThreadId,
+  ProviderSessionId,
   ThreadId,
   TurnItemId,
   type OrchestrationV2ThreadProjection,
@@ -17,6 +18,13 @@ import * as Layer from "effect/Layer";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
+import * as EventSink from "./EventSink.ts";
+import * as EffectWorker from "./EffectWorker.ts";
+import {
+  ProviderAdapterEnsureThreadError,
+  ProviderAdapterResumeThreadError,
+} from "./ProviderAdapter.ts";
 import { applyOrchestrationV2ProjectionEvent } from "../../../../packages/client-runtime/src/state/orchestrationV2Projection.ts";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -419,4 +427,189 @@ it.live("synchronizes every forwarded thread live and on replay with one source 
       }
     }),
   ).pipe(Effect.provide(orchestratorLayer)),
+);
+
+it.effect("retries failed heads-up session restoration before settling feedback", () =>
+  Effect.gen(function* () {
+    let registrations = 0;
+    let opens = 0;
+    const delivered: Array<string | null> = [];
+    const pi = ProviderDriverKind.make("pi");
+    const piInstance = ProviderInstanceId.make("pi");
+    const threadId = ThreadId.make("restore-heads-up");
+    const sessionId = ProviderSessionId.make("restore-heads-up-session");
+    const now = yield* DateTime.now;
+    const providerThread = {
+      id: ProviderThreadId.make("restore-heads-up-native"),
+      driver: pi,
+      providerInstanceId: piInstance,
+      providerSessionId: sessionId,
+      appThreadId: threadId,
+      ownerNodeId: null,
+      nativeThreadRef: {
+        driver: pi,
+        nativeId: "/tmp/heads-up-session.jsonl",
+        strength: "strong" as const,
+      },
+      nativeConversationHeadRef: null,
+      status: "idle" as const,
+      firstRunOrdinal: null,
+      lastRunOrdinal: null,
+      handoffIds: [],
+      forkedFrom: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const piAdapter: ProviderAdapterV2Shape = {
+      ...adapter,
+      instanceId: piInstance,
+      driver: pi,
+      openSession: () =>
+        Effect.sync(() => {
+          opens++;
+          let loaded = false;
+          const register = Effect.gen(function* () {
+            registrations++;
+            if (registrations === 1) return yield* Effect.fail("switch_session cancelled");
+            loaded = true;
+            return providerThread;
+          });
+          return {
+            instanceId: piInstance,
+            driver: pi,
+            providerSessionId: sessionId,
+            providerSession: {
+              id: sessionId,
+              driver: pi,
+              providerInstanceId: piInstance,
+              status: "ready" as const,
+              cwd: "/tmp",
+              model: "default",
+              capabilities: CodexProviderCapabilitiesV2,
+              createdAt: now,
+              updatedAt: now,
+              lastError: null,
+            },
+            events: Stream.never,
+            ensureThread: () =>
+              register.pipe(
+                Effect.mapError(
+                  (cause) => new ProviderAdapterEnsureThreadError({ driver: pi, threadId, cause }),
+                ),
+              ),
+            resumeThread: () =>
+              register.pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapterResumeThreadError({
+                      driver: pi,
+                      providerSessionId: sessionId,
+                      providerThreadId: providerThread.id,
+                      cause,
+                    }),
+                ),
+              ),
+            answerHeadsUp: ({ resolution }) =>
+              Effect.sync(() => {
+                if (loaded) delivered.push(resolution);
+              }),
+            startTurn: () => Effect.die("No model turn for feedback"),
+            steerTurn: () => Effect.die("unused"),
+            interruptTurn: () => Effect.void,
+            respondToRuntimeRequest: () => Effect.die("unused"),
+            readThreadSnapshot: () => Effect.die("unused"),
+            rollbackThread: () => Effect.die("unused"),
+            forkThread: () => Effect.die("unused"),
+          };
+        }),
+    };
+    yield* Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("create-restore-heads-up"),
+        threadId,
+        projectId: ProjectId.make("restore-heads-up-project"),
+        title: "Restore feedback",
+        modelSelection: { instanceId: piInstance, model: "default" },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("restore-provider-thread"),
+            type: "provider-thread.updated",
+            threadId,
+            occurredAt: now,
+            payload: providerThread,
+          },
+        ],
+      });
+      const commandId = CommandId.make("restore-feedback");
+      yield* sink.writeWithEffects({
+        events: [],
+        effects: [
+          {
+            id: "restore-feedback-effect",
+            commandId,
+            threadId,
+            request: {
+              type: "provider-heads-up.answer",
+              providerThreadId: providerThread.id,
+              noteId: "n1",
+              resolution: "dismiss",
+            },
+          },
+        ],
+      });
+      assert.equal(yield* worker.drain(), 1);
+      assert.deepEqual(delivered, []);
+      assert.equal((yield* outbox.listByCommandId(commandId))[0]?.status, "pending");
+      yield* TestClock.adjust("100 millis");
+      assert.equal(yield* worker.drain(), 1);
+      assert.deepEqual(delivered, ["dismiss"]);
+      assert.equal((yield* outbox.listByCommandId(commandId))[0]?.status, "succeeded");
+      assert.equal(opens, 1);
+      assert.equal(registrations, 2);
+      // A loaded session answers again without switching away from its live thread.
+      yield* sink.writeWithEffects({
+        events: [],
+        effects: [
+          {
+            id: "undo-feedback-effect",
+            commandId,
+            threadId,
+            request: {
+              type: "provider-heads-up.answer",
+              providerThreadId: providerThread.id,
+              noteId: "n1",
+              resolution: null,
+            },
+          },
+        ],
+      });
+      yield* worker.drain();
+      assert.deepEqual(delivered, ["dismiss", null]);
+      assert.equal(registrations, 2);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          EffectOutbox.layer.pipe(Layer.provide(database)),
+          ProviderReplayHarness.layerWithRegistry(
+            { name: "heads-up-restore" },
+            ProviderAdapterRegistry.layerFromAdapters([piAdapter]),
+            { databaseLayer: database, runEffectWorker: false },
+          ),
+        ),
+      ),
+    );
+  }).pipe(Effect.scoped),
 );

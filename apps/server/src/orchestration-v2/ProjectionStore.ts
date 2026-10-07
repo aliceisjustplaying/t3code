@@ -54,7 +54,6 @@ import {
   OrchestrationV2RuntimeRequestJson as OrchestrationV2RuntimeRequestJsonSchema,
   OrchestrationV2SubagentJson as OrchestrationV2SubagentJsonSchema,
   OrchestrationV2TurnItemJson as OrchestrationV2TurnItemJsonSchema,
-  OrchestrationV2HeadsUpAction,
   orchestrationV2RunWorkStartedAt,
   RunId,
   MessageId,
@@ -80,7 +79,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import type * as Statement from "effect/sql/Statement";
 
 import { MCP_APP_OUTPUT_KEY } from "@t3tools/shared/mcpApp";
-import { withHeadsUp } from "./HeadsUpNotice.ts";
+import { inheritHeadsUpState } from "./HeadsUpState.ts";
 
 import { threadHtmlRenderAttachmentIds } from "../attachmentStore.ts";
 import {
@@ -2467,35 +2466,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             break;
           }
           case "turn-item.updated": {
-            let item = withHeadsUp(event.payload);
-            if (item.type === "system_notice" && item.headsUp !== undefined) {
-              const state = yield* sql<{ readAt: string | null; resolution: string | null }>`
-                SELECT MAX(json_extract(payload_json, '$.headsUp.readAt')) AS "readAt",
-                  MAX(json_extract(payload_json, '$.headsUp.resolution')) AS resolution
-                FROM orchestration_v2_projection_turn_items
-                WHERE type = 'system_notice'
-                  AND json_extract(payload_json, '$.headsUp.noteId') = ${item.headsUp.noteId}
-                  AND COALESCE(json_extract(payload_json, '$.headsUp.sourceThreadId'), thread_id) = ${item.headsUp.sourceThreadId ?? item.threadId}
-                  AND provider_thread_id IS ${item.providerThreadId}
-              `;
-              // Providers can repeat a note with a new item id on reconnect.
-              // Its source identity retains the user's read/review state.
-              const prior = state[0];
-              const resolution =
-                prior?.resolution == null
-                  ? undefined
-                  : yield* Schema.decodeUnknownEffect(OrchestrationV2HeadsUpAction)(
-                      prior.resolution,
-                    );
-              item = {
-                ...item,
-                headsUp: {
-                  ...item.headsUp,
-                  ...(prior?.readAt == null ? {} : { readAt: prior.readAt }),
-                  ...(resolution === undefined ? {} : { resolution }),
-                },
-              };
-            }
+            // Historical events predate pre-append normalization. Replaying them
+            // must retain the same user-owned state as newly normalized events.
+            const item = yield* inheritHeadsUpState(event.payload).pipe(
+              Effect.provideService(SqlClient.SqlClient, sql),
+            );
             const payloadJson = yield* encodeTurnItemPayload(item);
             const payload = parseEncodedPayload(payloadJson);
             yield* sql`

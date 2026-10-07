@@ -1253,6 +1253,9 @@ export function makePiAdapterV2(
         };
         jobs.set(key, item);
         yield* emit({ type: "turn_item.updated", driver: PI_PROVIDER, turnItem: item });
+        if (state.activeTurn === null && previous?.job?.state !== job.state) {
+          yield* probeBackgroundWork.pipe(Effect.forkIn(scope));
+        }
       });
 
       const retireJobs = Effect.gen(function* () {
@@ -1667,15 +1670,52 @@ export function makePiAdapterV2(
 
       // ── event pump ────────────────────────────────────────
 
+      const updateBackgroundWork = (state: PiThreadState, pending: boolean) => {
+        const tasks = state.providerThread.pendingBackgroundTasks ?? [];
+        if (tasks.some((task) => task.taskId === "pi:background-work") === pending)
+          return Effect.void;
+        return updateProviderThread(state, {
+          pendingBackgroundTasks: [
+            ...tasks.filter((task) => task.taskId !== "pi:background-work"),
+            ...(pending
+              ? [
+                  {
+                    taskId: "pi:background-work",
+                    kind: "background_task" as const,
+                    description: "Pi background work or pending wake-up",
+                  },
+                ]
+              : []),
+          ],
+        });
+      };
+
       // The keepalive includes held wake-ups, not just running processes.
       // Status replies have no request ID, so serialize probes. The event pump
       // must remain free to receive the reply while a probe awaits it.
       const probeBackgroundWork = backgroundProbePermit.withPermits(1)(
         Effect.gen(function* () {
+          const state = threadState;
+          const providerThread = state?.providerThread;
           const probe = yield* Deferred.make<boolean>();
           backgroundProbe = probe;
           yield* request({ type: "prompt", message: "/t3-background-work" }, 2_000);
-          return yield* Deferred.await(probe);
+          const pending = yield* Deferred.await(probe);
+          // Idle lifecycle changes have no turn settlement to refresh this row.
+          // Do not apply an old snapshot across a new turn or thread switch.
+          yield* sessionEventPermit.withPermits(1)(
+            Effect.gen(function* () {
+              if (
+                state === null ||
+                state !== threadState ||
+                state.activeTurn !== null ||
+                state.providerThread !== providerThread
+              )
+                return;
+              yield* updateBackgroundWork(state, pending || wake !== null);
+            }),
+          );
+          return pending;
         }).pipe(
           Effect.timeoutOrElse({
             duration: Duration.seconds(5),
@@ -1768,7 +1808,11 @@ export function makePiAdapterV2(
           turn === null &&
           type !== "response" &&
           !type.startsWith("t3.") &&
-          !jobEvent
+          !jobEvent &&
+          !(
+            type === "extension_ui_request" &&
+            recordString(event, "statusKey") === "t3:background-work"
+          )
         ) {
           wake.events.push(event);
           return;
@@ -2177,18 +2221,7 @@ export function makePiAdapterV2(
             ) {
               turn.settleWhenIdle = false;
               if (state !== null) {
-                yield* updateProviderThread(state, {
-                  pendingBackgroundTasks:
-                    event["pendingBackgroundWork"] === true
-                      ? [
-                          {
-                            taskId: "pi:background-work",
-                            kind: "background_task",
-                            description: "Pi background work or pending wake-up",
-                          },
-                        ]
-                      : [],
-                });
+                yield* updateBackgroundWork(state, event["pendingBackgroundWork"] === true);
                 yield* finalizeTurn(state);
               }
             }
@@ -2861,6 +2894,7 @@ export function makePiAdapterV2(
               type: "prompt",
               message: "/wake-stop " + stopInput.scope + " " + stopInput.jobId,
             });
+            yield* probeBackgroundWork;
           }).pipe(
             Effect.mapError(
               (cause) =>

@@ -5140,3 +5140,228 @@ it.effect.each(["other-session", "unattached", "detached", "wrong-driver", "forw
       }).pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 60_000 })), Effect.scoped);
     }),
 );
+
+it.effect.each(["owned", "unattached", "wrong-driver"] as const)(
+  "session-owned idle notices and snapshots: %s",
+  (ownership) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      yield* Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const store = yield* EventStore.EventStoreV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("idle-notice");
+        const otherId = ThreadId.make("idle-other");
+        yield* sink.write({
+          events: [
+            yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now }),
+            yield* makeThreadCreatedEvent({ idAllocator: ids, threadId: otherId, now }),
+          ],
+        });
+        const providerSessionId = yield* ids.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        const runtime = yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const queue = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId))!;
+        const target = ownership === "unattached" ? otherId : threadId;
+        const afterSequence = yield* store.latestSequence();
+        // No turn subscriber: the session marker acknowledges the pump on either implementation.
+        yield* Queue.offerAll(queue, [
+          {
+            type: "provider_thread.updated",
+            driver: ownership === "wrong-driver" ? ProviderDriverKind.make("pi") : CODEX_DRIVER,
+            providerThread: {
+              ...makeProviderThread({ idAllocator: ids, threadId: target, providerSessionId, now }),
+              pendingBackgroundTasks: [],
+            },
+          },
+          ...["Ordinary notice", "[ysk:idle] Heads up · Idle extension notice"].map(
+            (message, index): ProviderAdapterV2Event => ({
+              type: "turn_item.updated",
+              driver: ownership === "wrong-driver" ? ProviderDriverKind.make("pi") : CODEX_DRIVER,
+              turnItem: {
+                id: TurnItemId.make(`idle-${index}`),
+                threadId: target,
+                runId: null,
+                nodeId: null,
+                providerThreadId: null,
+                providerTurnId: null,
+                nativeItemRef: null,
+                parentItemId: null,
+                ordinal: index,
+                status: "completed",
+                title: null,
+                startedAt: now,
+                completedAt: now,
+                updatedAt: now,
+                type: "system_notice",
+                message,
+              },
+            }),
+          ),
+          {
+            type: "provider_session.updated",
+            driver: CODEX_DRIVER,
+            providerSession: runtime.providerSession,
+          },
+        ]);
+        yield* sink.stream({ threadId, afterSequence }).pipe(
+          Stream.filter((stored) => stored.event.type === "provider-session.updated"),
+          Stream.take(1),
+          Stream.runDrain,
+        );
+        const projection = yield* projections.getThreadProjection(target);
+        assert.equal(projection.providerThreads.length, ownership === "owned" ? 1 : 0);
+        assert.equal(projection.turnItems.length, ownership === "owned" ? 2 : 0);
+        const events = yield* store
+          .read({ afterSequence, eventType: "turn-item.updated" })
+          .pipe(Stream.runCollect);
+        assert.equal(events.length, ownership === "owned" ? 2 : 0);
+        assert.equal(projection.runs.length, 0);
+        // A subscriber must not also receive the session-owned event.
+        const subscription = yield* runtime.subscribeEvents!;
+        yield* Queue.offerAll(queue, [
+          {
+            type: "turn_item.updated",
+            driver: CODEX_DRIVER,
+            turnItem: {
+              id: TurnItemId.make("subscribed-notice"),
+              threadId,
+              runId: null,
+              nodeId: null,
+              providerThreadId: null,
+              providerTurnId: null,
+              nativeItemRef: null,
+              parentItemId: null,
+              ordinal: 3,
+              status: "completed",
+              title: null,
+              startedAt: now,
+              completedAt: now,
+              updatedAt: now,
+              type: "system_notice",
+              message: "Ordinary notice",
+            },
+          },
+          {
+            type: "provider_session.updated",
+            driver: CODEX_DRIVER,
+            providerSession: runtime.providerSession,
+          },
+        ]);
+        const delivered = yield* subscription.events.pipe(
+          Stream.takeUntil((event) => event.type === "provider_session.updated"),
+          Stream.runCollect,
+        );
+        assert.deepEqual(
+          delivered.map((event) => event.type),
+          ["provider_session.updated"],
+        );
+      }).pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 60_000 })), Effect.scoped);
+    }),
+);
+
+it.effect.each([false, true])(
+  "idle roster updates retain run ownership (superseded: %s)",
+  (superseded) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      yield* Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("idle-roster");
+        const providerSessionId = yield* ids.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        const providerThread = {
+          ...makeProviderThread({ idAllocator: ids, threadId, providerSessionId, now }),
+          lastRunOrdinal: 1,
+          pendingBackgroundTasks: [
+            { taskId: "pi:background-work", kind: "background_task" as const },
+          ],
+        };
+        const runId = RunId.make("idle-roster-origin");
+        yield* sink.write({
+          events: [
+            yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now }),
+            {
+              id: yield* ids.allocate.event({ threadId }),
+              threadId,
+              occurredAt: now,
+              type: "run.updated",
+              payload: {
+                id: runId,
+                threadId,
+                ordinal: 1,
+                providerInstanceId: modelSelection.instanceId,
+                modelSelection,
+                providerThreadId: providerThread.id,
+                userMessageId: MessageId.make("idle-roster-message"),
+                rootNodeId: null,
+                activeAttemptId: ids.derive.runAttempt({ runId, attemptOrdinal: 1 }),
+                status: "completed",
+                requestedAt: now,
+                startedAt: now,
+                completedAt: now,
+                checkpointId: null,
+                contextHandoffId: null,
+              },
+            },
+            {
+              id: yield* ids.allocate.event({ threadId }),
+              threadId,
+              occurredAt: now,
+              type: "provider-thread.updated",
+              payload: {
+                ...providerThread,
+                lastRunOrdinal: superseded ? 2 : 1,
+              },
+            },
+          ],
+        });
+        const runtime = yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const queue = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId))!;
+        const afterSequence = yield* sink.latestSequence();
+        yield* Queue.offerAll(queue, [
+          {
+            type: "provider_thread.updated",
+            driver: CODEX_DRIVER,
+            providerThread: { ...providerThread, pendingBackgroundTasks: [] },
+          },
+          {
+            type: "provider_session.updated",
+            driver: CODEX_DRIVER,
+            providerSession: runtime.providerSession,
+          },
+        ]);
+        yield* sink.stream({ threadId, afterSequence }).pipe(
+          Stream.filter((stored) => stored.event.type === "provider-session.updated"),
+          Stream.take(1),
+          Stream.runDrain,
+        );
+        const { providerThreads } = yield* projections.getThreadRecords(threadId, [
+          "providerThreads",
+        ]);
+        assert.equal(providerThreads[0]?.lastRunOrdinal, superseded ? 2 : 1);
+        assert.equal(providerThreads[0]?.pendingBackgroundTasks?.length, superseded ? 1 : 0);
+      }).pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 60_000 })), Effect.scoped);
+    }),
+);

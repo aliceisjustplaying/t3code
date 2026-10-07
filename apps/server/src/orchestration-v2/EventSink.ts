@@ -24,6 +24,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 
 import { replayAndBufferProjectedLiveEvents } from "./LiveStreamBudget.ts";
 import type { UnsequencedProjectEvent } from "../persistence/OrchestrationEventStore.ts";
+import { inheritHeadsUpState } from "./HeadsUpState.ts";
 import { projectDomainEventForWire } from "./WireProjection.ts";
 
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
@@ -323,7 +324,12 @@ const layerBase: Layer.Layer<
                   event.payload,
                   event.payload.runId === null ? undefined : runOrdinals.get(event.payload.runId),
                 )
-                .pipe(Effect.map((payload) => ({ ...event, payload })))
+                .pipe(
+                  Effect.flatMap((item) =>
+                    inheritHeadsUpState(item).pipe(Effect.provideService(SqlClient.SqlClient, sql)),
+                  ),
+                  Effect.map((payload) => ({ ...event, payload })),
+                )
             : Effect.succeed(event),
         { concurrency: 1 },
       );
