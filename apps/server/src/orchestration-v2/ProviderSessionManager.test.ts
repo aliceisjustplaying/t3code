@@ -156,7 +156,7 @@ const layerPausingAttachEventSink = (pause: {
           }),
       });
     }),
-  ).pipe(Layer.provide(layerTestEventSink));
+  ).pipe(Layer.provide(layerDefaultTestEventSink));
 
 const CodexCapabilities: OrchestrationV2ProviderCapabilities = CodexProviderCapabilitiesV2;
 const ExclusiveCapabilities: OrchestrationV2ProviderCapabilities = {
