@@ -71,7 +71,7 @@ export function useHeadsUpInbox(environmentId: EnvironmentId, threadId: ThreadId
                 <SymbolView name="chevron.left" size={18} tintColorClassName="accent-foreground" />
                 <Text className="text-base text-foreground">Back</Text>
               </Pressable>
-              <Text accessibilityRole="header" className="text-base font-t3-bold text-foreground">
+              <Text accessibilityRole="header" className="text-lg font-t3-bold text-foreground">
                 You should know
               </Text>
             </View>
@@ -361,7 +361,7 @@ function InboxPages({
               ) : null}
             </View>
             {expanded === entry.id ? (
-              <View className="gap-3 bg-subtle px-4 py-4">
+              <View className="gap-2 bg-subtle px-4 py-2">
                 <Text selectable className="text-sm text-foreground">
                   {entry.note.explanation ?? "No additional explanation was supplied."}
                 </Text>

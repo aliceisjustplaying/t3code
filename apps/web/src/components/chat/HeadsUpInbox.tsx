@@ -69,7 +69,7 @@ export function HeadsUpInbox({
           <SheetBackdrop className="z-60 sm:absolute sm:top-(--workspace-topbar-height) sm:z-(--z-sheet)" />
           <Dialog.Viewport className="fixed inset-0 z-60 flex justify-end sm:absolute sm:top-(--workspace-topbar-height) sm:z-(--z-sheet)">
             <Dialog.Popup className="flex h-full w-full min-w-0 flex-col overflow-hidden border-l border-border bg-popover text-popover-foreground shadow-lg sm:max-w-[450px]">
-              <div className="flex flex-col gap-1 px-4 py-3 sm:gap-2 sm:p-6">
+              <div className="flex flex-col gap-1 px-4 py-3">
                 <div className="flex items-center gap-3">
                   <Dialog.Close
                     render={<Button variant="ghost" size="sm" aria-label="Back to chat" />}
@@ -78,11 +78,9 @@ export function HeadsUpInbox({
                     <span className="sm:hidden">Back</span>
                     <XIcon className="hidden sm:block" aria-hidden="true" />
                   </Dialog.Close>
-                  <Dialog.Title className="text-base font-semibold sm:text-xl">
-                    You should know
-                  </Dialog.Title>
+                  <Dialog.Title className="text-xl font-semibold">You should know</Dialog.Title>
                 </div>
-                <Dialog.Description className="text-xs text-muted-foreground sm:text-sm">
+                <Dialog.Description className="text-sm text-muted-foreground">
                   Current environment · All projects and threads
                 </Dialog.Description>
               </div>
@@ -265,7 +263,7 @@ function InboxPages({
               aria-expanded={expanded === entry.id}
               aria-controls={`ysk-${entry.id}`}
               onClick={() => setExpanded(expanded === entry.id ? null : entry.id)}
-              className="block w-full px-4 py-2 text-left sm:py-3 hover:bg-muted/50 focus-visible:outline-2 focus-visible:outline-ring aria-expanded:bg-muted/50"
+              className="block w-full px-4 py-2 text-left hover:bg-muted/50 focus-visible:outline-2 focus-visible:outline-ring aria-expanded:bg-muted/50"
             >
               <span className="flex flex-wrap justify-between gap-3 text-xs text-muted-foreground">
                 <span>
@@ -363,7 +361,10 @@ function InboxPages({
               ) : null}
             </div>
             {expanded === entry.id ? (
-              <div id={`ysk-${entry.id}`} className="min-w-0 space-y-3 bg-muted/20 p-4 text-sm">
+              <div
+                id={`ysk-${entry.id}`}
+                className="min-w-0 space-y-2 bg-muted/20 px-4 py-2 text-sm"
+              >
                 {entry.note.explanation ? (
                   <ChatMarkdown
                     text={entry.note.explanation}
