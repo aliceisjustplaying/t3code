@@ -53,9 +53,15 @@ const encode = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 // Explicit opt-in: exercises a separately checked-out extension and an installed Pi,
 // with isolated configuration/session files and no provider/model calls.
-for (const wakeOnExit of [false, true]) {
+for (const { wakeOnExit, otherWork } of [
+  { wakeOnExit: false, otherWork: "none" },
+  { wakeOnExit: true, otherWork: "none" },
+  { wakeOnExit: true, otherWork: "job" },
+  { wakeOnExit: true, otherWork: "subagent" },
+  { wakeOnExit: true, otherWork: "held-wake" },
+]) {
   it.live.skipIf(!extension)(
-    `real Pi jobs persist completion blockers only when wake_on_exit is ${wakeOnExit} and stop in their owning runtime`,
+    `real Pi jobs reconcile stop (wake_on_exit: ${wakeOnExit}, other work: ${otherWork})`,
     () =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
@@ -72,7 +78,12 @@ export default function(pi) {
     return target[key];
   }}));
   pi.registerCommand("exercise", { description: "Isolated test", handler: async (args, ctx) => {
-    await tools.get("job_run").execute("test", JSON.parse(args), undefined, undefined, ctx);
+    const job = JSON.parse(args);
+    await tools.get("job_run").execute("test", job, undefined, undefined, ctx);
+    const other = ${encode(otherWork)};
+    if (other === "job") await tools.get("job_run").execute("other", { ...job, name: "Other job" }, undefined, undefined, ctx);
+    if (other === "subagent") globalThis[Symbol.for("pi-subagents/runtime")] = { runningSubagents: new Map([["child", {}]]) };
+    if (other === "held-wake") globalThis[Symbol.for("pi-subagents/keepalive")].add("wake:held");
   }});
 }`,
         );
@@ -193,7 +204,7 @@ export default function(pi) {
               }),
           },
         });
-        const takeJob = (state: string) =>
+        const takeJob = (state: string, id?: string) =>
           Effect.gen(function* () {
             while (true) {
               const event = yield* Queue.take(queue);
@@ -201,6 +212,7 @@ export default function(pi) {
                 event.type === "turn_item.updated" &&
                 event.turnItem.type === "system_notice" &&
                 event.turnItem.job?.state === state &&
+                (id === undefined || event.turnItem.job.id === id) &&
                 event.turnItem.job.output.includes("ready")
               )
                 return event.turnItem;
@@ -222,10 +234,14 @@ export default function(pi) {
           scope: running.job!.scope,
           jobId: running.job!.id,
         });
-        const stopped = yield* takeJob("stopped");
+        const stopped = yield* takeJob("stopped", running.job!.id);
         assert.equal(stopped.id, running.id);
         assert.equal(stopped.job?.signal, "SIGTERM");
         const restored = yield* projections.getThreadSnapshotWindow(threadId, { rowLimit: 1 });
+        assert.equal(
+          (restored.projection.providerThreads[0]?.pendingBackgroundTasks?.length ?? 0) > 0,
+          otherWork !== "none",
+        );
         assert.isTrue(
           restored.projection.turnItems.some(
             (item) => item.type === "system_notice" && item.job?.state === "stopped",

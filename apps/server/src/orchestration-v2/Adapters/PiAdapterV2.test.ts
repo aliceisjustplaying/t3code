@@ -843,10 +843,26 @@ describe("PiAdapterV2", () => {
           runtime.stopJob!({ providerThread, scope: "another-runtime", jobId: "1" }),
         );
         assert.equal(wrong._tag, "Failure");
-        assert.isFalse(fake.allRequests().some((request) => request["type"] === "prompt"));
+        assert.isFalse(
+          fake
+            .allRequests()
+            .some(
+              (request) =>
+                request["type"] === "prompt" && request["message"] !== "/t3-background-work",
+            ),
+        );
         fake.queueCommands({ commands: [{ name: "wake-stop", source: "extension" }] });
         yield* runtime.stopJob!({ providerThread, scope: "runtime-one", jobId: "1" });
-        assert.equal((yield* fake.takeRequest("prompt"))["message"], "/wake-stop runtime-one 1");
+        assert.deepEqual(
+          fake
+            .allRequests()
+            .filter(
+              (request) =>
+                request["type"] === "prompt" && request["message"] !== "/t3-background-work",
+            )
+            .map((request) => request["message"]),
+          ["/wake-stop runtime-one 1"],
+        );
         for (const [index, state] of ["succeeded", "failed", "timed_out", "stopped"].entries()) {
           const data = {
             ...snapshot,

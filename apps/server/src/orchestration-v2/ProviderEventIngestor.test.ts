@@ -1596,13 +1596,23 @@ it.effect("copies app-owned child heads-ups once to their owner without waking a
       events: [
         {
           id: EventId.make("ysk-answer"),
-          type: "turn-item.updated",
+          type: "thread.heads-up.updated",
           threadId: parent.threadId,
           occurredAt: now,
-          payload: { ...forwarded, headsUp: { ...forwarded.headsUp!, resolution: "dismiss" } },
+          payload: {
+            sourceThreadId: childId,
+            providerThreadId: notice.providerThreadId,
+            noteId: "n1",
+            readAt: DateTime.formatIso(now),
+            resolution: "dismiss",
+          },
         },
       ],
     });
+    const cursor = yield* sink.latestSequence();
+    const published = yield* sink
+      .stream({ afterSequence: cursor })
+      .pipe(Stream.take(2), Stream.runCollect, Effect.forkScoped);
     const repeated = yield* Effect.all(
       [ingest(), ingest({ ...notice, id: TurnItemId.make("ysk-re-notify") })],
       { concurrency: "unbounded" },
@@ -1611,6 +1621,46 @@ it.effect("copies app-owned child heads-ups once to their owner without waking a
       repeated.map((events) => events.length),
       [1, 1],
     );
+    assert.deepEqual(
+      Array.from(yield* Fiber.join(published)),
+      repeated.flat().sort((a, b) => a.sequence - b.sequence),
+    );
+    for (const stored of repeated.flat()) {
+      assert.equal(stored.event.type, "turn-item.updated");
+      if (stored.event.type !== "turn-item.updated") continue;
+      const item = stored.event.payload;
+      assert(item.type === "system_notice");
+      assert.equal(item.headsUp?.resolution, "dismiss");
+      assert.equal(item.headsUp?.readAt, DateTime.formatIso(now));
+      const durable = yield* projections.getTurnItem({ threadId: childId, itemId: item.id });
+      assert(durable?.type === "system_notice");
+      assert.deepEqual(item.headsUp, durable.headsUp);
+      const replay = yield* (yield* EventStore.EventStoreV2)
+        .read({ afterSequence: stored.sequence - 1 })
+        .pipe(Stream.take(1), Stream.runCollect);
+      assert.deepEqual(replay[0]?.event, stored.event);
+    }
+    // Old event logs contain the original unmerged provider snapshot. Replay
+    // still inherits inbox state even though those historical bytes stay intact.
+    const historical = yield* (yield* EventStore.EventStoreV2).append({
+      events: [
+        {
+          id: EventId.make("historical-repeat"),
+          type: "turn-item.updated",
+          threadId: childId,
+          occurredAt: now,
+          payload: { ...notice, id: TurnItemId.make("historical-repeat") },
+        },
+      ],
+    });
+    yield* projections.apply(historical[0]!.event);
+    const restored = yield* projections.getTurnItem({
+      threadId: childId,
+      itemId: TurnItemId.make("historical-repeat"),
+    });
+    assert(restored?.type === "system_notice");
+    assert.equal(restored.headsUp?.resolution, "dismiss");
+    assert.equal(restored.headsUp?.readAt, DateTime.formatIso(now));
     const answered = yield* projections.getTurnItem({
       threadId: parent.threadId,
       itemId: forwarded.id,

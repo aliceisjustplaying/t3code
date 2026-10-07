@@ -275,7 +275,7 @@ function sessionKey(providerSessionId: ProviderSessionId): string {
 }
 
 /**
- * Runless requests and job snapshots belong to the live session, not a turn
+ * Runless notices/requests and job snapshots belong to the live session, not a turn
  * subscriber. Jobs keep their originating run attribution even when a later
  * turn is active, so their entire lifecycle is persisted by the session pump.
  */
@@ -292,7 +292,9 @@ function sessionScopedEventThreadId(event: ProviderAdapterV2Event): ThreadId | u
         return event.turnItem.threadId;
       }
       return event.turnItem.runId === null &&
-        (event.turnItem.type === "approval_request" || event.turnItem.type === "user_input_request")
+        (event.turnItem.type === "system_notice" ||
+          event.turnItem.type === "approval_request" ||
+          event.turnItem.type === "user_input_request")
         ? event.turnItem.threadId
         : undefined;
     default:
@@ -1954,45 +1956,82 @@ export const layerWithOptions = (
               ),
               Effect.andThen(
                 Effect.gen(function* () {
-                  // Requests can block before a run subscriber exists. Jobs
-                  // can finish after it closes. Neither may depend on a turn's
-                  // lifetime, and publishing them too would ingest them twice.
-                  const threadId = sessionScopedEventThreadId(event);
+                  // Requests/notices and jobs outlive turns. Idle thread snapshots
+                  // fall back to this owner once the run subscriber is gone; while
+                  // it exists, its attempt gate and background tracking still own them.
+                  const current = (yield* Ref.get(sessions)).get(
+                    sessionKey(entry.runtime.providerSessionId),
+                  );
+                  if (current?.runtime !== entry.runtime) return;
+                  const threadId =
+                    event.type === "provider_thread.updated" &&
+                    !hasBusyTurn(current, event.providerThread.id) &&
+                    (yield* Ref.get(entry.eventSubscribers)).size === 0
+                      ? (event.providerThread.appThreadId ?? undefined)
+                      : sessionScopedEventThreadId(event);
                   if (threadId !== undefined) {
                     yield* Effect.gen(function* () {
                       const current = (yield* Ref.get(sessions)).get(
                         sessionKey(entry.runtime.providerSessionId),
                       );
-                      if (current?.runtime !== entry.runtime) return;
+                      if (
+                        current?.runtime !== entry.runtime ||
+                        !current.attachedThreadIds.has(threadId) ||
+                        event.driver !== entry.runtime.driver
+                      )
+                        return;
+                      if (
+                        event.type === "provider_thread.updated" &&
+                        event.providerThread.providerSessionId !== entry.runtime.providerSessionId
+                      )
+                        return;
                       if (
                         event.type === "turn_item.updated" &&
                         event.turnItem.type === "system_notice" &&
                         event.turnItem.job !== undefined &&
-                        (!current.attachedThreadIds.has(threadId) ||
-                          event.driver !== entry.runtime.driver ||
-                          event.turnItem.job.providerSessionId !==
-                            entry.runtime.providerSessionId ||
+                        (event.turnItem.job.providerSessionId !== entry.runtime.providerSessionId ||
                           event.turnItem.job.sourceThreadId !== undefined)
                       )
                         return;
-                      yield* providerEventIngestor
-                        .ingestNormalized({
-                          providerSessionId: entry.runtime.providerSessionId,
-                          providerInstanceId: entry.runtime.instanceId,
-                          threadId,
-                          event,
-                        })
-                        .pipe(
-                          Effect.mapError(
-                            (cause) =>
-                              new ProviderAdapterEventStreamError({
-                                driver: entry.runtime.driver,
-                                providerSessionId: entry.runtime.providerSessionId,
-                                cause,
-                              }),
-                          ),
+                      let writeIfProviderThreadOwner;
+                      if (
+                        event.type === "provider_thread.updated" &&
+                        event.providerThread.lastRunOrdinal !== null
+                      ) {
+                        const { runs } = yield* projectionStore.getThreadRecords(threadId, [
+                          "runs",
+                        ]);
+                        const owner = runs.find(
+                          (run) =>
+                            run.ordinal === event.providerThread.lastRunOrdinal &&
+                            run.providerThreadId === event.providerThread.id,
                         );
-                    }).pipe(entry.requestEventPermit.withPermits(1));
+                        if (owner?.activeAttemptId == null) return;
+                        writeIfProviderThreadOwner = {
+                          providerThreadId: event.providerThread.id,
+                          runId: owner.id,
+                          activeAttemptId: owner.activeAttemptId,
+                          expectedLastRunOrdinal: owner.ordinal,
+                        };
+                      }
+                      yield* providerEventIngestor.ingestNormalized({
+                        ...(writeIfProviderThreadOwner ? { writeIfProviderThreadOwner } : {}),
+                        providerSessionId: entry.runtime.providerSessionId,
+                        providerInstanceId: entry.runtime.instanceId,
+                        threadId,
+                        event,
+                      });
+                    }).pipe(
+                      entry.requestEventPermit.withPermits(1),
+                      Effect.mapError(
+                        (cause) =>
+                          new ProviderAdapterEventStreamError({
+                            driver: entry.runtime.driver,
+                            providerSessionId: entry.runtime.providerSessionId,
+                            cause,
+                          }),
+                      ),
+                    );
                     return;
                   }
                   yield* publishToSubscribers(entry.eventSubscribers, { type: "event", event });
