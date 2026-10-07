@@ -40,6 +40,9 @@ export default Effect.gen(function* () {
       after = row.turn_item_id;
     }
   }
+  // Both changes now exist; reconcile the old fork ledger with upstream's ID.
+  yield* sql`UPDATE effect_sql_migrations SET name = 'McpAppModelContext'
+    WHERE migration_id = 59 AND name = 'HeadsUpInbox'`;
   yield* sql`CREATE INDEX IF NOT EXISTS orchestration_v2_heads_up_identity_idx
     ON orchestration_v2_projection_turn_items (
       COALESCE(json_extract(payload_json, '$.headsUp.sourceThreadId'), thread_id),

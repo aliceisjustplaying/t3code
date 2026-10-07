@@ -40,6 +40,7 @@ describe("V2 preview upgrade", () => {
         [57, "ScheduledTaskWebhooks"],
         [58, "WebhookRelayDeliveries"],
         [59, "McpAppModelContext"],
+        [60, "HeadsUpInbox"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_legacy_imports`, imports);
@@ -122,6 +123,7 @@ describe("V2 preview upgrade", () => {
         [57, "ScheduledTaskWebhooks"],
         [58, "WebhookRelayDeliveries"],
         [59, "McpAppModelContext"],
+        [60, "HeadsUpInbox"],
       ]);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
@@ -140,3 +142,25 @@ describe("V2 preview upgrade", () => {
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 });
+
+it.effect("upgrades fork migration 59 without losing YSK or skipping MCP app storage", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* runMigrations();
+    // Recreate the previous fork's ledger and schema: YSK owned 59.
+    yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id = 60`;
+    yield* sql`UPDATE effect_sql_migrations SET name = 'HeadsUpInbox' WHERE migration_id = 59`;
+    yield* sql`DROP TABLE mcp_app_model_context`;
+    yield* runMigrations();
+    yield* sql`INSERT INTO mcp_app_model_context (thread_id, item_id, server, tool, text, updated_at) VALUES ('thread', 'item', 'server', 'tool', 'retained context', 'now')`;
+    assert.deepStrictEqual(yield* sql`SELECT text FROM mcp_app_model_context`, [
+      { text: "retained context" },
+    ]);
+    assert.strictEqual(
+      (yield* sql`SELECT name FROM sqlite_master WHERE name = 'orchestration_v2_heads_up_identity_idx'`)
+        .length,
+      1,
+    );
+    assert.deepStrictEqual(yield* runMigrations(), []);
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+);

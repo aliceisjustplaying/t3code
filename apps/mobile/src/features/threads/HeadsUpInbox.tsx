@@ -32,32 +32,13 @@ export function useHeadsUpInbox(environmentId: EnvironmentId, threadId: ThreadId
   const summary = useEnvironmentQuery(headsUpInbox.summary({ environmentId, input: {} }));
   const connection = useAtomValue(environmentCatalog.stateAtom(environmentId));
   const connected = Option.getOrNull(AsyncResult.value(connection))?.phase === "connected";
-  const count = summary.data?.unreadCount;
-  const previousCount = useRef(count);
-  const [highlight, setHighlight] = useState(false);
-  const highlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => {
-    if (
-      count !== undefined &&
-      previousCount.current !== undefined &&
-      count > previousCount.current
-    ) {
-      if (highlightTimer.current !== null) clearTimeout(highlightTimer.current);
-      setHighlight(true);
-      highlightTimer.current = setTimeout(() => setHighlight(false), 1200);
-    }
-    previousCount.current = count;
-  }, [count]);
-  useEffect(
-    () => () => {
-      if (highlightTimer.current !== null) clearTimeout(highlightTimer.current);
-    },
-    [],
-  );
+  const count = summary.data?.unresolvedCount;
+  const unreadCount = summary.data?.unreadCount;
+  const highlight = (unreadCount ?? 0) > 0;
   const button = (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={`You should know${count === undefined ? ", loading" : `, ${count} unread`}${connected ? "" : ", disconnected"}`}
+      accessibilityLabel={`You should know${count === undefined ? ", loading" : `, ${count} unresolved, ${unreadCount ?? 0} unread`}${connected ? "" : ", disconnected"}`}
       accessibilityState={{ expanded: open }}
       onPress={() => setOpen(true)}
       className={`min-h-11 min-w-11 flex-row items-center justify-center gap-1 rounded-xl px-2 ${highlight ? "bg-subtle-strong" : "bg-transparent"}`}

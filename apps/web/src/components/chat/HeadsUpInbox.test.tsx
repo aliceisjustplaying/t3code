@@ -50,7 +50,7 @@ vi.mock("../../state/query", () => ({
             ],
             nextCursor: null,
           }
-        : { unreadCount: 1, unresolvedCount: 1, reviewedCount: 1 },
+        : { unreadCount: state.acknowledged ? 0 : 1, unresolvedCount: 1, reviewedCount: 1 },
     isPending: query === "page" && state.pending,
     error: null,
     refresh: state.refresh,
@@ -234,3 +234,18 @@ it.each(["unresolved", "reviewed"] as const)(
     expect(state.navigate).not.toHaveBeenCalled();
   },
 );
+
+it("keeps the unresolved counter after opening and acknowledging notices", async () => {
+  await openInbox();
+  state.acknowledged = true;
+  await render();
+  await act(async () =>
+    document.querySelector<HTMLButtonElement>('button[aria-label="Back to chat"]')!.click(),
+  );
+  const trigger = document.querySelector<HTMLButtonElement>(
+    'button[aria-label^="You should know"]',
+  )!;
+  expect(trigger.textContent).toContain("1");
+  expect(trigger.getAttribute("aria-label")).toContain("1 unresolved");
+  expect(trigger.getAttribute("aria-label")).toContain("0 unread");
+});

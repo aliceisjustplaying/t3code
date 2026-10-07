@@ -21,7 +21,7 @@ import * as Projections from "./ProjectionStore.ts";
 import * as Inbox from "./HeadsUpInbox.ts";
 import * as EventStore from "./EventStore.ts";
 import * as EventSink from "./EventSink.ts";
-import Migration from "../persistence/Migrations/059_HeadsUpInbox.ts";
+import Migration from "../persistence/Migrations/060_HeadsUpInbox.ts";
 
 const database = Sqlite.layerMemory;
 const events = ApplicationEvents.layer.pipe(Layer.provide(database));
