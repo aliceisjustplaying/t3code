@@ -492,6 +492,7 @@ export function makePiAdapterV2(
       const sessionEventPermit = yield* Semaphore.make(1);
       let threadState: PiThreadState | null = null;
       let backgroundProbe: Deferred.Deferred<boolean> | undefined;
+      const backgroundProbePermit = yield* Semaphore.make(1);
       let noticeOrdinal = 0;
       const jobs = new Map<string, Extract<OrchestrationV2TurnItem, { type: "system_notice" }>>();
       let registrationAttempted = false;
@@ -1555,6 +1556,9 @@ export function makePiAdapterV2(
         const turn = state.activeTurn;
         if (turn === null) return;
         state.activeTurn = null;
+        if (turn.interrupted || !readUsage) {
+          yield* updateProviderThread(state, { pendingBackgroundTasks: [] });
+        }
         if (turn.failure === null) turn.failure = turn.promptRejection;
         const completedAt = yield* DateTime.now;
         yield* completeOpenStreamItems(turn);
@@ -1663,6 +1667,29 @@ export function makePiAdapterV2(
 
       // ── event pump ────────────────────────────────────────
 
+      // The keepalive includes held wake-ups, not just running processes.
+      // Status replies have no request ID, so serialize probes. The event pump
+      // must remain free to receive the reply while a probe awaits it.
+      const probeBackgroundWork = backgroundProbePermit.withPermits(1)(
+        Effect.gen(function* () {
+          const probe = yield* Deferred.make<boolean>();
+          backgroundProbe = probe;
+          yield* request({ type: "prompt", message: "/t3-background-work" }, 2_000);
+          return yield* Deferred.await(probe);
+        }).pipe(
+          Effect.timeoutOrElse({
+            duration: Duration.seconds(5),
+            orElse: () => Effect.succeed(true),
+          }),
+          Effect.catchCause(() => Effect.succeed(true)),
+          Effect.ensuring(
+            Effect.sync(() => {
+              backgroundProbe = undefined;
+            }),
+          ),
+        ),
+      );
+
       const scheduleSettleProbe = (
         turn: ActivePiTurn,
         settleAfterAgentActivity = false,
@@ -1670,9 +1697,13 @@ export function makePiAdapterV2(
       ) => {
         const providerTurnId = turn.providerTurn.id;
         const settleProbeGeneration = turn.settleProbeGeneration;
-        return request({ type: "get_state" }, 2_000).pipe(
+        return Effect.gen(function* () {
+          const pendingBackgroundWork = yield* probeBackgroundWork;
+          const data = yield* request({ type: "get_state" }, 2_000);
+          return { data, pendingBackgroundWork };
+        }).pipe(
           Effect.matchEffect({
-            onSuccess: (data) =>
+            onSuccess: ({ data, pendingBackgroundWork }) =>
               Queue.offer(connection.events, {
                 type: "t3.settle_probe",
                 providerTurnId,
@@ -1680,6 +1711,7 @@ export function makePiAdapterV2(
                 settleProbeGeneration,
                 attempt,
                 data,
+                pendingBackgroundWork,
               }),
             // A failed probe still has to reach the pump. Dropping it would
             // leave a command-only turn active forever, because Pi never emits
@@ -2144,7 +2176,21 @@ export function makePiAdapterV2(
               (recordNumber(data, "pendingMessageCount") ?? 0) === 0
             ) {
               turn.settleWhenIdle = false;
-              if (state !== null) yield* finalizeTurn(state);
+              if (state !== null) {
+                yield* updateProviderThread(state, {
+                  pendingBackgroundTasks:
+                    event["pendingBackgroundWork"] === true
+                      ? [
+                          {
+                            taskId: "pi:background-work",
+                            kind: "background_task",
+                            description: "Pi background work or pending wake-up",
+                          },
+                        ]
+                      : [],
+                });
+                yield* finalizeTurn(state);
+              }
             }
             return;
           }
@@ -2441,10 +2487,7 @@ export function makePiAdapterV2(
         },
         events: Stream.fromQueue(events),
         hasPendingBackgroundWork: Effect.gen(function* () {
-          const probe = yield* Deferred.make<boolean>();
-          backgroundProbe = probe;
-          yield* request({ type: "prompt", message: "/t3-background-work" }, 2_000);
-          const pending = yield* Deferred.await(probe);
+          const pending = yield* probeBackgroundWork;
           const state = yield* request({ type: "get_state" }, 2_000);
           return (
             pending ||
@@ -2459,11 +2502,6 @@ export function makePiAdapterV2(
             orElse: () => Effect.succeed(true),
           }),
           Effect.catchCause(() => Effect.succeed(true)),
-          Effect.ensuring(
-            Effect.sync(() => {
-              backgroundProbe = undefined;
-            }),
-          ),
         ),
         getModelContextWindow: (selection) => {
           if (selection.instanceId !== options.instanceId) return undefined;

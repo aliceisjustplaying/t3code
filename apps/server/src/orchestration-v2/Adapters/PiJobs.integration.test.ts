@@ -12,6 +12,7 @@ import {
   MessageId,
   type OrchestrationV2AppThread,
 } from "@t3tools/contracts";
+import * as Deferred from "effect/Deferred";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -52,16 +53,17 @@ const encode = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 // Explicit opt-in: exercises a separately checked-out extension and an installed Pi,
 // with isolated configuration/session files and no provider/model calls.
-it.live.skipIf(!extension)(
-  "real Pi jobs reach persisted T3 snapshots and stop in their owning runtime",
-  () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "pi-jobs-" });
-      const driver = dir + "/driver.ts";
-      yield* fs.writeFileString(
-        driver,
-        `import wake from ${encode(extension)};
+for (const wakeOnExit of [false, true]) {
+  it.live.skipIf(!extension)(
+    `real Pi jobs persist completion blockers only when wake_on_exit is ${wakeOnExit} and stop in their owning runtime`,
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const dir = yield* fs.makeTempDirectoryScoped({ prefix: "pi-jobs-" });
+        const driver = dir + "/driver.ts";
+        yield* fs.writeFileString(
+          driver,
+          `import wake from ${encode(extension)};
 export default function(pi) {
   const tools = new Map();
   wake(new Proxy(pi, { get(target, key) {
@@ -73,153 +75,163 @@ export default function(pi) {
     await tools.get("job_run").execute("test", JSON.parse(args), undefined, undefined, ctx);
   }});
 }`,
-      );
-      const ids = yield* IdAllocator.IdAllocatorV2;
-      const eventSink = yield* EventSink.EventSinkV2;
-      const projections = yield* ProjectionStore.ProjectionStoreV2;
-      const eventsIngestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
-      const now = yield* DateTime.now;
-      const threadId = ThreadId.make("isolated-pi-job");
-      const sessionId = ProviderSessionId.make("isolated-pi-session");
-      const instanceId = ProviderInstanceId.make("pi");
-      const modelSelection = { instanceId, model: "default" };
-      const thread: OrchestrationV2AppThread = {
-        id: threadId,
-        projectId: ProjectId.make("isolated-project"),
-        title: "Jobs integration",
-        providerInstanceId: instanceId,
-        modelSelection,
-        runtimeMode: "full-access",
-        interactionMode: "default",
-        createdBy: "user",
-        creationSource: "web",
-        branch: null,
-        worktreePath: null,
-        activeProviderThreadId: null,
-        lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
-        forkedFrom: null,
-        createdAt: now,
-        updatedAt: now,
-        archivedAt: null,
-        settledOverride: null,
-        settledAt: null,
-        lastVisitedAt: null,
-        deletedAt: null,
-      };
-      yield* eventSink.write({
-        events: [
-          {
-            id: EventId.make("integration-thread"),
-            type: "thread.created",
-            threadId,
-            occurredAt: now,
-            payload: thread,
-          },
-        ],
-      });
-      const adapter = makePiAdapterV2({
-        instanceId,
-        settings: {
-          enabled: true,
-          binaryPath: process.env.PI_TEST_BINARY || "pi",
-          launchArgs: `--no-extensions --no-skills --no-prompt-templates --no-context-files --session-dir ${encode(dir + "/sessions")} --extension ${encode(driver)}`,
-          customModels: [],
-        },
-        environment: { ...process.env, PI_CODING_AGENT_DIR: dir + "/agent", TMPDIR: dir },
-        spawner: yield* ChildProcessSpawner.ChildProcessSpawner,
-        fileSystem: fs,
-        idAllocator: ids,
-        serverConfig: yield* ServerConfig.ServerConfig,
-      });
-      const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
-        runtimeMode: "full-access",
-        interactionMode: "default",
-        cwd: dir,
-      });
-      const runtime = yield* adapter.openSession({
-        threadId,
-        providerSessionId: sessionId,
-        modelSelection,
-        runtimePolicy,
-      });
-      const queue = yield* Queue.unbounded<ProviderAdapterV2Event>();
-      yield* runtime.events.pipe(
-        Stream.runForEach((event) =>
-          Effect.gen(function* () {
-            if (event.type === "turn_item.updated" || event.type === "provider_thread.updated")
-              yield* eventsIngestor.ingestNormalized({
-                providerSessionId: sessionId,
-                providerInstanceId: instanceId,
-                threadId,
-                event,
-              });
-            yield* Queue.offer(queue, event);
-          }),
-        ),
-        Effect.forkScoped,
-      );
-      const providerThread = yield* runtime.ensureThread({
-        threadId,
-        modelSelection,
-        runtimePolicy,
-      });
-      const runId = RunId.make("isolated-run");
-      yield* runtime.startTurn({
-        appThread: thread,
-        threadId,
-        providerThread,
-        runId,
-        runOrdinal: 1,
-        providerTurnOrdinal: 1,
-        attemptId: RunAttemptId.make("isolated-attempt"),
-        rootNodeId: NodeId.make("isolated-node"),
-        modelSelection,
-        runtimePolicy,
-        message: {
-          messageId: MessageId.make("isolated-message"),
-          attachments: [],
+        );
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const eventSink = yield* EventSink.EventSinkV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const eventsIngestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("isolated-pi-job");
+        const sessionId = ProviderSessionId.make("isolated-pi-session");
+        const instanceId = ProviderInstanceId.make("pi");
+        const modelSelection = { instanceId, model: "default" };
+        const thread: OrchestrationV2AppThread = {
+          id: threadId,
+          projectId: ProjectId.make("isolated-project"),
+          title: "Jobs integration",
+          providerInstanceId: instanceId,
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
           createdBy: "user",
           creationSource: "web",
-          text:
-            "/exercise " +
-            encode({
-              name: "Real background job",
-              command: `${encode(process.execPath)} -e 'console.log("ready"); setInterval(() => {}, 1000)'`,
-              wake_on_exit: false,
-            }),
-        },
-      });
-      const takeJob = (state: string) =>
-        Effect.gen(function* () {
-          while (true) {
-            const event = yield* Queue.take(queue);
-            if (
-              event.type === "turn_item.updated" &&
-              event.turnItem.type === "system_notice" &&
-              event.turnItem.job?.state === state &&
-              event.turnItem.job.output.includes("ready")
-            )
-              return event.turnItem;
-          }
+          branch: null,
+          worktreePath: null,
+          activeProviderThreadId: null,
+          lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+          archivedAt: null,
+          settledOverride: null,
+          settledAt: null,
+          lastVisitedAt: null,
+          deletedAt: null,
+        };
+        yield* eventSink.write({
+          events: [
+            {
+              id: EventId.make("integration-thread"),
+              type: "thread.created",
+              threadId,
+              occurredAt: now,
+              payload: thread,
+            },
+          ],
         });
-      const running = yield* takeJob("running");
-      const persisted = yield* projections.getThreadSnapshotWindow(threadId, { rowLimit: 1 });
-      const saved = persisted.projection.turnItems.find((item) => item.id === running.id);
-      assert.isTrue(saved?.type === "system_notice" && saved.job?.output.includes("ready"));
-      yield* runtime.stopJob!({
-        providerThread,
-        scope: running.job!.scope,
-        jobId: running.job!.id,
-      });
-      const stopped = yield* takeJob("stopped");
-      assert.equal(stopped.id, running.id);
-      assert.equal(stopped.job?.signal, "SIGTERM");
-      const restored = yield* projections.getThreadSnapshotWindow(threadId, { rowLimit: 1 });
-      assert.isTrue(
-        restored.projection.turnItems.some(
-          (item) => item.type === "system_notice" && item.job?.state === "stopped",
-        ),
-      );
-    }).pipe(Effect.scoped, Effect.provide(layer)),
-  30000,
-);
+        const adapter = makePiAdapterV2({
+          instanceId,
+          settings: {
+            enabled: true,
+            binaryPath: process.env.PI_TEST_BINARY || "pi",
+            launchArgs: `--no-extensions --no-skills --no-prompt-templates --no-context-files --session-dir ${encode(dir + "/sessions")} --extension ${encode(driver)}`,
+            customModels: [],
+          },
+          environment: { ...process.env, PI_CODING_AGENT_DIR: dir + "/agent", TMPDIR: dir },
+          spawner: yield* ChildProcessSpawner.ChildProcessSpawner,
+          fileSystem: fs,
+          idAllocator: ids,
+          serverConfig: yield* ServerConfig.ServerConfig,
+        });
+        const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: dir,
+        });
+        const runtime = yield* adapter.openSession({
+          threadId,
+          providerSessionId: sessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const queue = yield* Queue.unbounded<ProviderAdapterV2Event>();
+        const terminal = yield* Deferred.make<void>();
+        yield* runtime.events.pipe(
+          Stream.runForEach((event) =>
+            Effect.gen(function* () {
+              if (event.type === "turn_item.updated" || event.type === "provider_thread.updated")
+                yield* eventsIngestor.ingestNormalized({
+                  providerSessionId: sessionId,
+                  providerInstanceId: instanceId,
+                  threadId,
+                  event,
+                });
+              if (event.type === "turn.terminal") yield* Deferred.succeed(terminal, undefined);
+              yield* Queue.offer(queue, event);
+            }),
+          ),
+          Effect.forkScoped,
+        );
+        const providerThread = yield* runtime.ensureThread({
+          threadId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const runId = RunId.make("isolated-run");
+        yield* runtime.startTurn({
+          appThread: thread,
+          threadId,
+          providerThread,
+          runId,
+          runOrdinal: 1,
+          providerTurnOrdinal: 1,
+          attemptId: RunAttemptId.make("isolated-attempt"),
+          rootNodeId: NodeId.make("isolated-node"),
+          modelSelection,
+          runtimePolicy,
+          message: {
+            messageId: MessageId.make("isolated-message"),
+            attachments: [],
+            createdBy: "user",
+            creationSource: "web",
+            text:
+              "/exercise " +
+              encode({
+                name: "Real background job",
+                command: `${encode(process.execPath)} -e 'console.log("ready"); setInterval(() => {}, 1000)'`,
+                wake_on_exit: wakeOnExit,
+              }),
+          },
+        });
+        const takeJob = (state: string) =>
+          Effect.gen(function* () {
+            while (true) {
+              const event = yield* Queue.take(queue);
+              if (
+                event.type === "turn_item.updated" &&
+                event.turnItem.type === "system_notice" &&
+                event.turnItem.job?.state === state &&
+                event.turnItem.job.output.includes("ready")
+              )
+                return event.turnItem;
+            }
+          });
+        const running = yield* takeJob("running");
+        yield* Deferred.await(terminal);
+        const persisted = yield* projections.getThreadSnapshotWindow(threadId, { rowLimit: 1 });
+        assert.equal(
+          persisted.projection.providerThreads.some(
+            (thread) => (thread.pendingBackgroundTasks?.length ?? 0) > 0,
+          ),
+          wakeOnExit,
+        );
+        const saved = persisted.projection.turnItems.find((item) => item.id === running.id);
+        assert.isTrue(saved?.type === "system_notice" && saved.job?.output.includes("ready"));
+        yield* runtime.stopJob!({
+          providerThread,
+          scope: running.job!.scope,
+          jobId: running.job!.id,
+        });
+        const stopped = yield* takeJob("stopped");
+        assert.equal(stopped.id, running.id);
+        assert.equal(stopped.job?.signal, "SIGTERM");
+        const restored = yield* projections.getThreadSnapshotWindow(threadId, { rowLimit: 1 });
+        assert.isTrue(
+          restored.projection.turnItems.some(
+            (item) => item.type === "system_notice" && item.job?.state === "stopped",
+          ),
+        );
+      }).pipe(Effect.scoped, Effect.provide(layer)),
+    30000,
+  );
+}
