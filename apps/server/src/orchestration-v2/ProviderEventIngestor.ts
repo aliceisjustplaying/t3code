@@ -391,7 +391,7 @@ export const layer: Layer.Layer<
 
     const contextParentThreadId = Effect.fnUntraced(function* (input: ProviderEventIngestInput) {
       if (input.event.type !== "turn_item.updated") return undefined;
-      const item = withHeadsUp(stripUnservedToolOutputImageBytes(input.event.turnItem));
+      const item = withHeadsUp(input.event.turnItem);
       if (
         item.type !== "system_notice" ||
         (item.headsUp === undefined && item.job === undefined) ||
@@ -479,7 +479,7 @@ export const layer: Layer.Layer<
               }),
             ];
           case "turn_item.updated": {
-            const item = withHeadsUp(input.event.turnItem);
+            const item = withHeadsUp(stripUnservedToolOutputImageBytes(input.event.turnItem));
             const events = [
               yield* makeDomainEvent(input, {
                 type: "turn-item.updated",
