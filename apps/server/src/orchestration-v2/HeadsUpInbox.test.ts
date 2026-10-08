@@ -90,7 +90,10 @@ const note = (
       : {}),
   },
 });
-const create = (threadId: ThreadId, archived = false): OrchestrationV2DomainEvent => ({
+const create = (
+  threadId: ThreadId,
+  archived = false,
+): Extract<OrchestrationV2DomainEvent, { type: "thread.created" }> => ({
   id: EventId.make(`create:${threadId}`),
   threadId,
   type: "thread.created",
@@ -120,10 +123,10 @@ const create = (threadId: ThreadId, archived = false): OrchestrationV2DomainEven
   },
 });
 
-// Query boundary owns dedup, paging and durable counts. A projection/window
+// Query boundary owns dedup, full results and durable counts. A projection/window
 // fixture cannot fake those SQL semantics or source-session isolation.
 it.effect(
-  "queries durable environment notices, deduplicates source copies and pages without losing old or archived notes",
+  "queries durable environment notices, deduplicates source copies and returns all entries without losing old or archived notes",
   () =>
     Effect.gen(function* () {
       const projections = yield* Projections.ProjectionStoreV2;
@@ -137,23 +140,20 @@ it.effect(
         note("new-session", 6, { providerThreadId: ProviderThreadId.make("session-2") }),
       );
       yield* projections.apply(note("independent-parent", 7, { threadId: parent }));
-      const first = yield* inbox.list({ view: "unresolved", limit: 1 });
-      assert.equal(first.unreadCount, 3);
-      assert.equal(first.unresolvedCount, 3);
-      assert.equal(first.items[0]?.turnItemId, "independent-parent");
-      assert(first.nextCursor !== null);
-      const second = yield* inbox.list({ view: "unresolved", limit: 1, cursor: first.nextCursor });
-      assert.equal(second.items[0]?.turnItemId, "new-session");
-      assert(second.nextCursor !== null);
-      const third = yield* inbox.list({ view: "unresolved", limit: 1, cursor: second.nextCursor });
-      assert.equal(third.nextCursor, null);
-      assert.equal(third.items[0]?.turnItemId, "original");
-      assert.equal(third.items[0]?.sourceThreadId, source);
-      assert.equal(third.items[0]?.targetThreadId, parent);
-      assert.equal(third.items[0]?.sourceThreadTitle, "Title child");
-      assert.equal(third.items[0]?.note.line, "Shared cache");
-      assert.equal(third.items[0]?.note.evidence, "cache.ts:12");
-      assert.equal(third.items[0]?.note.explanation, "A cache explanation.");
+      const all = yield* inbox.list({ view: "unresolved" });
+      assert.equal(all.unreadCount, 3);
+      assert.equal(all.unresolvedCount, 3);
+      assert.deepEqual(
+        all.items.map((entry) => entry.turnItemId),
+        ["independent-parent", "new-session", "original"],
+      );
+      const original = all.items[2];
+      assert.equal(original?.sourceThreadId, source);
+      assert.equal(original?.targetThreadId, parent);
+      assert.equal(original?.sourceThreadTitle, "Title child");
+      assert.equal(original?.note.line, "Shared cache");
+      assert.equal(original?.note.evidence, "cache.ts:12");
+      assert.equal(original?.note.explanation, "A cache explanation.");
 
       yield* projections.apply({
         id: EventId.make("read"),
@@ -215,10 +215,6 @@ it.effect(
       assert.equal(restored.items.length, 3);
       assert.equal(restored.unreadCount, 2);
       assert.equal((yield* inbox.list({ view: "reviewed" })).items.length, 0);
-      assert.equal(
-        (yield* Effect.exit(inbox.list({ view: "unresolved", cursor: "bad" })))._tag,
-        "Failure",
-      );
     }).pipe(Effect.provide(layer)),
 );
 
@@ -300,4 +296,46 @@ it.live(
         );
       }),
     ).pipe(Effect.provide(streamingLayer), Effect.timeout("5 seconds")),
+);
+
+it.effect("returns all 75 notices in project recency order, not notice recency", () =>
+  Effect.gen(function* () {
+    const projections = yield* Projections.ProjectionStoreV2;
+    const inbox = yield* Inbox.HeadsUpInbox;
+    const sql = yield* SqlClient.SqlClient;
+    const old = ThreadId.make("old-project");
+    const recent = ThreadId.make("recent-project");
+    const archived = ThreadId.make("archived-project");
+    for (const id of [old, recent, archived]) {
+      const event = create(id, id === archived);
+      yield* projections.apply({
+        ...event,
+        payload: { ...event.payload, projectId: ProjectId.make(id === archived ? old : id) },
+      });
+    }
+    // Notice updates make the old project's thread.updatedAt newer. The latest
+    // user message must still win, matching the landing project sort source.
+    for (let index = 0; index < 75; index++) {
+      yield* projections.apply(
+        note(`global-${index}`, index + 1, {
+          threadId: index < 35 ? recent : old,
+          providerThreadId: ProviderThreadId.make(`global-session-${index}`),
+        }),
+      );
+    }
+    yield* sql`INSERT INTO orchestration_v2_projection_messages
+      (message_id, thread_id, role, streaming, created_at, updated_at, payload_json)
+      VALUES ('old-user', ${old}, 'user', 0, '2026-10-06T00:01:00.000Z', '2026-10-06T00:01:00.000Z', '{}'),
+        ('recent-user', ${recent}, 'user', 0, '2026-10-06T00:10:00.000Z', '2026-10-06T00:10:00.000Z', '{}'),
+        ('archived-user', ${archived}, 'user', 0, '2026-10-06T23:00:00.000Z', '2026-10-06T23:00:00.000Z', '{}')`;
+    const all = yield* inbox.list({ view: "unresolved" });
+    assert.equal(all.unreadCount, 75);
+    assert.equal(all.items.length, 75);
+    assert.equal(all.nextCursor, null);
+    assert.deepEqual(
+      all.items.map((entry) => entry.projectId),
+      [...Array(35).fill(recent), ...Array(40).fill(old)],
+    );
+    assert.equal(new Set(all.items.map((entry) => entry.id)).size, 75);
+  }).pipe(Effect.provide(layer)),
 );

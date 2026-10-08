@@ -97,7 +97,6 @@ vi.mock("../../state/query", () => ({
                 },
               },
             ],
-            nextCursor: null,
           }
         : { unreadCount: 0, unresolvedCount: 1, reviewedCount: 0 },
     isPending: false,

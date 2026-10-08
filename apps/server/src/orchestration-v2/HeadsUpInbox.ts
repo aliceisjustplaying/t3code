@@ -1,3 +1,4 @@
+import { getThreadSortTimestamp, toSortableTimestamp } from "@t3tools/shared/threadSortTimestamp";
 import {
   HeadsUpInboxEntry,
   HeadsUpInboxError,
@@ -15,11 +16,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
 import { parseHeadsUpNotice } from "./HeadsUpNotice.ts";
 
-const Cursor = Schema.fromJsonString(
-  Schema.Struct({ createdAt: Schema.String, id: Schema.String }),
-);
-const decodeCursor = Schema.decodeUnknownEffect(Cursor);
-const encodeCursor = Schema.encodeSync(Cursor);
+const encodeProjectIds = Schema.encodeSync(Schema.fromJsonString(Schema.Array(Schema.String)));
 const Row = HeadsUpInboxEntry.mapFields((fields) => ({
   ...fields,
   note: Schema.fromJsonString(OrchestrationV2HeadsUp),
@@ -81,20 +78,63 @@ const make = Effect.gen(function* () {
   );
 
   const list: HeadsUpInbox["Service"]["list"] = Effect.fn("HeadsUpInbox.list")(function* (input) {
-    const cursor =
-      input.cursor === undefined
-        ? undefined
-        : yield* decodeCursor(input.cursor).pipe(
-            Effect.mapError((cause) => new HeadsUpInboxError({ operation: "cursor", cause })),
-          );
-    const limit = input.limit ?? 50;
     return yield* sql
       .withTransaction(
         Effect.gen(function* () {
           const state = yield* summary();
+          const projectRows = yield* sql<{
+            projectId: string;
+            title: string;
+            createdAt: string | null;
+            updatedAt: string | null;
+          }>`
+            SELECT ids.project_id AS "projectId", COALESCE(p.title, ids.project_id) AS title,
+              p.created_at AS "createdAt", p.updated_at AS "updatedAt"
+            FROM (SELECT project_id FROM projection_projects WHERE deleted_at IS NULL
+              UNION SELECT project_id FROM orchestration_v2_projection_threads WHERE deleted_at IS NULL) ids
+            LEFT JOIN projection_projects p ON p.project_id = ids.project_id AND p.deleted_at IS NULL
+          `;
+          const threadRows = yield* sql<{
+            projectId: string;
+            createdAt: string;
+            updatedAt: string;
+            latestUserMessageAt: string | null;
+          }>`
+            SELECT t.project_id AS "projectId", t.created_at AS "createdAt", t.updated_at AS "updatedAt",
+              (SELECT m.updated_at FROM orchestration_v2_projection_messages m
+                WHERE m.thread_id = t.thread_id AND m.role = 'user'
+                ORDER BY m.updated_at DESC, m.message_id DESC LIMIT 1) AS "latestUserMessageAt"
+            FROM orchestration_v2_projection_threads t
+            WHERE t.deleted_at IS NULL AND t.archived_at IS NULL
+          `;
+          // Reuse the landing/sidebar timestamp source, not notice activity.
+          const activity = new Map<string, number>();
+          for (const thread of threadRows) {
+            activity.set(
+              thread.projectId,
+              Math.max(
+                activity.get(thread.projectId) ?? Number.NEGATIVE_INFINITY,
+                getThreadSortTimestamp(thread, "updated_at"),
+              ),
+            );
+          }
+          const projectTimestamp = (project: (typeof projectRows)[number]) =>
+            activity.get(project.projectId) ??
+            toSortableTimestamp(project.updatedAt ?? project.createdAt ?? undefined) ??
+            Number.NEGATIVE_INFINITY;
+          const projectOrder = [...projectRows].sort((left, right) => {
+            const a = projectTimestamp(left);
+            const b = projectTimestamp(right);
+            return (
+              (a === b ? 0 : b > a ? 1 : -1) ||
+              left.title.localeCompare(right.title) ||
+              left.projectId.localeCompare(right.projectId)
+            );
+          });
+          const projectIds = encodeProjectIds(projectOrder.map((project) => project.projectId));
           const rows = yield* sql`
-        ${candidates}
-        SELECT ranked.identity AS id, ranked.thread_id AS "threadId", ranked.turn_item_id AS "turnItemId",
+        ${candidates}, project_order AS (SELECT value AS project_id, CAST(key AS INTEGER) AS position FROM json_each(${projectIds}))
+        SELECT target.project_id AS "projectId", COALESCE(project.title, target.project_id) AS "projectTitle", ranked.identity AS id, ranked.thread_id AS "threadId", ranked.turn_item_id AS "turnItemId",
           ranked.source_id AS "sourceThreadId", COALESCE(source.title, ranked.source_id) AS "sourceThreadTitle",
           COALESCE(grouped.parent_id, ranked.thread_id) AS "targetThreadId",
           COALESCE(target.title, ranked.source_id) AS "targetThreadTitle",
@@ -104,24 +144,16 @@ const make = Effect.gen(function* () {
         FROM ranked INNER JOIN grouped ON grouped.identity = ranked.identity
         LEFT JOIN orchestration_v2_projection_threads AS source ON source.thread_id = ranked.source_id
         LEFT JOIN orchestration_v2_projection_threads AS target ON target.thread_id = COALESCE(grouped.parent_id, ranked.thread_id)
+        INNER JOIN project_order ON project_order.project_id = target.project_id
+        LEFT JOIN projection_projects project ON project.project_id = target.project_id AND project.deleted_at IS NULL
         WHERE ranked.rank = 1
           AND ${input.view === "unresolved" ? sql`grouped.resolution IS NULL` : sql`grouped.resolution IS NOT NULL`}
-          ${cursor === undefined ? sql`` : sql`AND (grouped.created_at < ${cursor.createdAt} OR (grouped.created_at = ${cursor.createdAt} AND ranked.identity < ${cursor.id}))`}
-        ORDER BY grouped.created_at DESC, ranked.identity DESC LIMIT ${limit + 1}
+        ORDER BY project_order.position, grouped.created_at DESC, ranked.identity DESC
       `;
           const entries = yield* Schema.decodeUnknownEffect(Schema.Array(Row))(rows).pipe(
             Effect.mapError((cause) => new HeadsUpInboxError({ operation: "decode", cause })),
           );
-          const items = entries.slice(0, limit);
-          const last = items.at(-1);
-          return {
-            ...state,
-            items,
-            nextCursor:
-              entries.length > limit && last !== undefined
-                ? encodeCursor({ createdAt: last.createdAt, id: last.id })
-                : null,
-          };
+          return { ...state, items: entries, nextCursor: null };
         }),
       )
       .pipe(
@@ -145,10 +177,14 @@ const make = Effect.gen(function* () {
             sequence: stored.sequence,
             relevant:
               "aggregateKind" in stored
-                ? stored.type === "project.deleted"
+                ? stored.type === "project.deleted" || stored.type === "project.meta-updated"
                 : stored.event.type === "thread.heads-up.updated" ||
                   stored.event.type === "thread.deleted" ||
                   stored.event.type === "thread.metadata-updated" ||
+                  stored.event.type === "thread.archived" ||
+                  stored.event.type === "thread.unarchived" ||
+                  (stored.event.type === "message.updated" &&
+                    stored.event.payload.role === "user") ||
                   (stored.event.type === "turn-item.updated" &&
                     stored.event.payload.type === "system_notice" &&
                     (stored.event.payload.headsUp !== undefined ||

@@ -50,3 +50,18 @@ export const HEADS_UP_LABEL = {
   learn: "explained",
   send: "sent to agent",
 } as const;
+
+/** Preserve the server's globally paged project order and notice order. */
+export function groupHeadsUpInbox(items: readonly HeadsUpInboxEntry[]) {
+  const groups = new Map<string, { key: string; title: string; items: HeadsUpInboxEntry[] }>();
+  for (const entry of items) {
+    const key = entry.projectId ?? "unknown-project";
+    let group = groups.get(key);
+    if (!group) {
+      group = { key, title: entry.projectTitle ?? "Unknown project", items: [] };
+      groups.set(key, group);
+    }
+    group.items.push(entry);
+  }
+  return [...groups.values()];
+}

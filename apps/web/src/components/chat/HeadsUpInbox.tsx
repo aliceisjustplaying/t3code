@@ -1,6 +1,6 @@
 import { Dialog } from "@base-ui/react/dialog";
 import { useAtomValue } from "@effect/atom-react";
-import { appendHeadsUpFollowUp } from "@t3tools/client-runtime/heads-up";
+import { appendHeadsUpFollowUp, groupHeadsUpInbox } from "@t3tools/client-runtime/heads-up";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type {
   EnvironmentId,
@@ -119,7 +119,6 @@ function InboxPages({
   readonly onClose: () => void;
 }) {
   const [view, setView] = useState<HeadsUpInboxInput["view"]>("unresolved");
-  const [cursor, setCursor] = useState<string | undefined>();
   const [expanded, setExpanded] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -134,13 +133,12 @@ function InboxPages({
     };
   }, []);
   const summary = useEnvironmentQuery(headsUpInbox.summary({ environmentId, input: {} }));
-  const page = useEnvironmentQuery(
-    headsUpInbox.page({ environmentId, input: { view, limit: 30, ...(cursor ? { cursor } : {}) } }),
-  );
+  const page = useEnvironmentQuery(headsUpInbox.page({ environmentId, input: { view } }));
   const read = useAtomCommand(headsUpInbox.read, { reportFailure: false });
   const resolve = useAtomCommand(headsUpInbox.resolve, { reportFailure: false });
   const navigate = useNavigate();
   const items = page.data?.items;
+  const groups = groupHeadsUpInbox(items ?? []);
   useEffect(() => {
     if (!connected || !items) return;
     const unread = items.filter(
@@ -160,9 +158,8 @@ function InboxPages({
         if (mounted.current) setReadError(true);
       });
   }, [connected, environmentId, items, read]);
-  const changePage = (nextView: HeadsUpInboxInput["view"], nextCursor?: string) => {
+  const changeView = (nextView: HeadsUpInboxInput["view"]) => {
     setView(nextView);
-    setCursor(nextCursor);
     setExpanded(null);
     setActionError(null);
     setFeedback(null);
@@ -231,7 +228,7 @@ function InboxPages({
             key={tab}
             type="button"
             aria-pressed={view === tab}
-            onClick={() => changePage(tab)}
+            onClick={() => changeView(tab)}
             className="min-h-11 px-3 text-sm capitalize aria-pressed:border-b-2 aria-pressed:border-warning focus-visible:outline-2 focus-visible:outline-ring"
           >
             {tab}{" "}
@@ -243,7 +240,7 @@ function InboxPages({
       </div>
       <div
         className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto [overflow-wrap:anywhere]"
-        key={`${view}:${cursor ?? ""}`}
+        key={view}
         aria-busy={page.isPending}
       >
         {!connected ? (
@@ -274,169 +271,159 @@ function InboxPages({
         ) : null}
         {connected && !loadError && page.data?.items.length === 0 ? (
           <p className="p-6 text-sm text-muted-foreground">
-            {cursor
-              ? "No notices on this page."
-              : view === "reviewed"
-                ? "No reviewed notices yet."
-                : "Nothing unresolved. Reviewed notices can be restored anytime."}
+            {view === "reviewed"
+              ? "No reviewed notices yet."
+              : "Nothing unresolved. Reviewed notices can be restored anytime."}
           </p>
         ) : null}
-        {items?.map((entry) => (
-          <section key={entry.id} className="border-b border-border">
-            <button
-              type="button"
-              aria-expanded={expanded === entry.id}
-              aria-controls={`ysk-${entry.id}`}
-              onClick={() => setExpanded(expanded === entry.id ? null : entry.id)}
-              className="block w-full px-4 py-2 text-left hover:bg-muted/50 focus-visible:outline-2 focus-visible:outline-ring aria-expanded:bg-muted/50"
-            >
-              <span className="flex flex-wrap justify-between gap-3 text-xs text-muted-foreground">
-                <span>
-                  {entry.note.tag}
-                  {entry.readAt === null ? " · Unread" : ""}
-                </span>
-                <time dateTime={entry.createdAt}>{new Date(entry.createdAt).toLocaleString()}</time>
-              </span>
-              <span
-                className={`mt-1 text-sm font-medium ${expanded === entry.id ? "block" : "line-clamp-2 sm:line-clamp-none"}`}
-              >
-                {entry.note.line}
-              </span>
-            </button>
-            <div className="flex flex-wrap items-center gap-x-3 px-4 pb-2">
-              <div className="min-w-0 flex-1 break-words">
-                <span
-                  className={`block text-xs text-muted-foreground ${expanded === entry.id ? "" : "max-sm:truncate"}`}
+        {groups.map((group) => (
+          <section key={group.key} aria-label={group.title}>
+            <h2 className="border-b border-border px-4 py-2 text-sm font-medium">{group.title}</h2>
+            {group.items.map((entry) => (
+              <section key={entry.id} className="border-b border-border">
+                <button
+                  type="button"
+                  aria-expanded={expanded === entry.id}
+                  aria-controls={`ysk-${entry.id}`}
+                  onClick={() => setExpanded(expanded === entry.id ? null : entry.id)}
+                  className="block w-full px-4 py-2 text-left hover:bg-muted/50 focus-visible:outline-2 focus-visible:outline-ring aria-expanded:bg-muted/50"
                 >
-                  From {entry.sourceThreadTitle}
-                </span>
-                {entry.note.resolution ? (
-                  <span className="block text-xs text-muted-foreground">
-                    {entry.note.resolution === "knew"
-                      ? "Knew"
-                      : entry.note.resolution === "dismiss"
-                        ? "Dismissed"
-                        : "Reviewed"}
+                  <span className="flex flex-wrap justify-between gap-3 text-xs text-muted-foreground">
+                    <span>
+                      {entry.note.tag}
+                      {entry.readAt === null ? " · Unread" : ""}
+                    </span>
+                    <time dateTime={entry.createdAt}>
+                      {new Date(entry.createdAt).toLocaleString()}
+                    </time>
                   </span>
-                ) : null}
-              </div>
-              <div
-                className="flex min-h-11 w-full flex-wrap items-center gap-3"
-                aria-busy={busy === entry.id}
-              >
-                <Button
-                  size="sm"
-                  disabled={!connected || busy !== null}
-                  aria-label={`Ask agent · Draft: ${entry.note.line}`}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    void ask(entry);
-                  }}
-                >
-                  Ask agent · Draft
-                </Button>
-                {view === "reviewed" ? (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={!connected || busy !== null}
-                    aria-label={`${entry.note.resolution === "dismiss" || entry.note.resolution === "knew" ? "Undo" : "Restore"} · Restore to unresolved: ${entry.note.line}`}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      void act(entry, null);
-                    }}
+                  <span
+                    className={`mt-1 text-sm font-medium ${expanded === entry.id ? "block" : "line-clamp-2 sm:line-clamp-none"}`}
                   >
-                    {entry.note.resolution === "dismiss" || entry.note.resolution === "knew"
-                      ? "Undo"
-                      : "Restore"}
-                  </Button>
-                ) : (
-                  <>
+                    {entry.note.line}
+                  </span>
+                </button>
+                <div className="flex flex-wrap items-center gap-x-3 px-4 pb-2">
+                  <div className="min-w-0 flex-1 break-words">
+                    <span
+                      className={`block text-xs text-muted-foreground ${expanded === entry.id ? "" : "max-sm:truncate"}`}
+                    >
+                      From {entry.sourceThreadTitle}
+                    </span>
+                    {entry.note.resolution ? (
+                      <span className="block text-xs text-muted-foreground">
+                        {entry.note.resolution === "knew"
+                          ? "Knew"
+                          : entry.note.resolution === "dismiss"
+                            ? "Dismissed"
+                            : "Reviewed"}
+                      </span>
+                    ) : null}
+                  </div>
+                  <div
+                    className="flex min-h-11 w-full flex-wrap items-center gap-3"
+                    aria-busy={busy === entry.id}
+                  >
                     <Button
-                      variant="outline"
                       size="sm"
                       disabled={!connected || busy !== null}
-                      aria-label={`Dismiss: ${entry.note.line}`}
+                      aria-label={`Ask agent · Draft: ${entry.note.line}`}
                       onClick={(event) => {
                         event.stopPropagation();
-                        void act(entry, "dismiss");
+                        void ask(entry);
                       }}
                     >
-                      Dismiss
+                      Ask agent · Draft
                     </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={!connected || busy !== null}
-                      aria-label={`Knew: ${entry.note.line}`}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        void act(entry, "knew");
-                      }}
-                    >
-                      Knew
-                    </Button>
-                  </>
-                )}
-              </div>
-              {busy === entry.id ? (
-                <p role="status" className="text-xs">
-                  Saving…
-                </p>
-              ) : null}
-            </div>
-            {expanded === entry.id ? (
-              <div
-                id={`ysk-${entry.id}`}
-                className="min-w-0 space-y-2 bg-muted/20 px-4 py-2 text-sm"
-              >
-                {entry.note.explanation ? (
-                  <ChatMarkdown
-                    text={entry.note.explanation}
-                    cwd={undefined}
-                    environmentId={environmentId}
-                  />
-                ) : (
-                  <p className="text-muted-foreground">No additional explanation was supplied.</p>
-                )}
-                <p className="text-xs text-muted-foreground">
-                  Source: {entry.sourceThreadTitle}
-                  <br />
-                  Draft target: {entry.targetThreadTitle}
-                </p>
-                {entry.note.evidence ? (
-                  <>
-                    <h3 className="text-xs font-medium">Evidence</h3>
-                    <pre className="max-w-full whitespace-pre-wrap [overflow-wrap:anywhere] rounded border border-border p-3 text-xs">
-                      {entry.note.evidence}
-                    </pre>
-                  </>
+                    {view === "reviewed" ? (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={!connected || busy !== null}
+                        aria-label={`${entry.note.resolution === "dismiss" || entry.note.resolution === "knew" ? "Undo" : "Restore"} · Restore to unresolved: ${entry.note.line}`}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void act(entry, null);
+                        }}
+                      >
+                        {entry.note.resolution === "dismiss" || entry.note.resolution === "knew"
+                          ? "Undo"
+                          : "Restore"}
+                      </Button>
+                    ) : (
+                      <>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={!connected || busy !== null}
+                          aria-label={`Dismiss: ${entry.note.line}`}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void act(entry, "dismiss");
+                          }}
+                        >
+                          Dismiss
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={!connected || busy !== null}
+                          aria-label={`Knew: ${entry.note.line}`}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void act(entry, "knew");
+                          }}
+                        >
+                          Knew
+                        </Button>
+                      </>
+                    )}
+                  </div>
+                  {busy === entry.id ? (
+                    <p role="status" className="text-xs">
+                      Saving…
+                    </p>
+                  ) : null}
+                </div>
+                {expanded === entry.id ? (
+                  <div
+                    id={`ysk-${entry.id}`}
+                    className="min-w-0 space-y-2 bg-muted/20 px-4 py-2 text-sm"
+                  >
+                    {entry.note.explanation ? (
+                      <ChatMarkdown
+                        text={entry.note.explanation}
+                        cwd={undefined}
+                        environmentId={environmentId}
+                      />
+                    ) : (
+                      <p className="text-muted-foreground">
+                        No additional explanation was supplied.
+                      </p>
+                    )}
+                    <p className="text-xs text-muted-foreground">
+                      Source: {entry.sourceThreadTitle}
+                      <br />
+                      Draft target: {entry.targetThreadTitle}
+                    </p>
+                    {entry.note.evidence ? (
+                      <>
+                        <h3 className="text-xs font-medium">Evidence</h3>
+                        <pre className="max-w-full whitespace-pre-wrap [overflow-wrap:anywhere] rounded border border-border p-3 text-xs">
+                          {entry.note.evidence}
+                        </pre>
+                      </>
+                    ) : null}
+                    <p className="text-xs text-muted-foreground">
+                      Ask agent adds the note to the target thread’s unsent draft and dismisses it
+                      from Unresolved. Nothing is sent.
+                    </p>
+                  </div>
                 ) : null}
-                <p className="text-xs text-muted-foreground">
-                  Ask agent adds the note to the target thread’s unsent draft and dismisses it from
-                  Unresolved. Nothing is sent.
-                </p>
-              </div>
-            ) : null}
+              </section>
+            ))}
           </section>
         ))}
-        <div className="flex gap-2 p-4">
-          {cursor ? (
-            <Button variant="outline" size="sm" onClick={() => changePage(view)}>
-              Newest
-            </Button>
-          ) : null}
-          {page.data?.nextCursor ? (
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={!connected || page.isPending}
-              onClick={() => changePage(view, page.data?.nextCursor ?? undefined)}
-            >
-              Older notices
-            </Button>
-          ) : null}
-        </div>
       </div>
       {readError ? (
         <div role="alert" className="px-4 py-2 text-xs">

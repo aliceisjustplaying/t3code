@@ -16,6 +16,7 @@ import { ThreadDetailsSection } from "./ThreadDetailsSection";
 import { ThreadDetailsControl } from "./ThreadDetailsControl";
 import { AgentElapsed } from "./AgentElapsed";
 import { Button } from "../ui/button";
+import { CollapsibleSectionHeader } from "../ui/collapsible-section-header";
 import {
   AlertDialog,
   AlertDialogPopup,
@@ -47,65 +48,73 @@ function JobDuration({ job }: { job: ThreadJob }) {
 export function ThreadJobsPanel(props: Target & { onSelect: (id: TurnItemId) => void }) {
   const { jobs, hasMore, isPending, error, loadOlder, refresh } = useJobs(props);
   const [expanded, setExpanded] = useState(false);
+  const [sectionExpanded, setSectionExpanded] = useState(false);
   if (!jobs.length && !isPending && !error) return null;
   const active = jobs.filter(jobIsActive).length;
   const olderCount = Math.max(0, jobs.length - 5);
   return (
-    <ThreadDetailsSection
-      headingId="thread-jobs-heading"
-      title="Jobs"
-      actions={<span className="text-2xs text-muted-foreground">{active} running</span>}
-    >
-      {(expanded ? jobs : jobs.slice(0, 5)).map((job) => (
-        <ThreadDetailsControl
-          key={job.turnItemId}
-          onClick={() => props.onSelect(job.turnItemId)}
-          title={job.sourceTitle ? `Subagent: ${job.sourceTitle}` : job.name}
-        >
-          <span className="min-w-0 flex-1 truncate text-xs">
-            {job.sourceThreadId ? "↳ " : ""}
-            {job.name}
-          </span>
-          <span
-            className={
-              job.state === "failed" || job.state === "timed_out"
-                ? "text-2xs text-destructive"
-                : "text-2xs text-muted-foreground"
-            }
-          >
-            {jobStateLabel[job.state]}
-          </span>
-          <span className="text-2xs text-muted-foreground">
-            <JobDuration job={job} />
-          </span>
-        </ThreadDetailsControl>
-      ))}
-      {isPending && <p className="text-xs text-muted-foreground">Loading jobs…</p>}
-      {error && (
-        <Button variant="ghost" onClick={refresh}>
-          Retry loading jobs
-        </Button>
-      )}
-      {olderCount > 0 && (
-        <ThreadDetailsControl
-          tone="muted"
-          aria-expanded={expanded}
-          onClick={() => setExpanded(!expanded)}
-        >
-          {expanded ? "Hide" : "Show"} older jobs ({olderCount})
-        </ThreadDetailsControl>
-      )}
-      {hasMore && (
-        <ThreadDetailsControl
-          tone="muted"
-          disabled={isPending}
-          onClick={() => {
-            setExpanded(true);
-            loadOlder();
-          }}
-        >
-          Load older jobs
-        </ThreadDetailsControl>
+    <ThreadDetailsSection headingId="thread-jobs-heading" title="Jobs" showHeading={false}>
+      <CollapsibleSectionHeader
+        expanded={sectionExpanded}
+        onClick={() => setSectionExpanded(!sectionExpanded)}
+        accessory={<span className="text-2xs text-muted-foreground">{active} running</span>}
+      >
+        Jobs{!sectionExpanded && ` (${jobs.length}${hasMore ? "+" : ""})`}
+      </CollapsibleSectionHeader>
+      {sectionExpanded && (
+        <>
+          {(expanded ? jobs : jobs.slice(0, 5)).map((job) => (
+            <ThreadDetailsControl
+              key={job.turnItemId}
+              onClick={() => props.onSelect(job.turnItemId)}
+              title={job.sourceTitle ? `Subagent: ${job.sourceTitle}` : job.name}
+            >
+              <span className="min-w-0 flex-1 truncate text-xs">
+                {job.sourceThreadId ? "↳ " : ""}
+                {job.name}
+              </span>
+              <span
+                className={
+                  job.state === "failed" || job.state === "timed_out"
+                    ? "text-2xs text-destructive"
+                    : "text-2xs text-muted-foreground"
+                }
+              >
+                {jobStateLabel[job.state]}
+              </span>
+              <span className="text-2xs text-muted-foreground">
+                <JobDuration job={job} />
+              </span>
+            </ThreadDetailsControl>
+          ))}
+          {isPending && <p className="text-xs text-muted-foreground">Loading jobs…</p>}
+          {error && (
+            <Button variant="ghost" onClick={refresh}>
+              Retry loading jobs
+            </Button>
+          )}
+          {olderCount > 0 && (
+            <ThreadDetailsControl
+              tone="muted"
+              aria-expanded={expanded}
+              onClick={() => setExpanded(!expanded)}
+            >
+              {expanded ? "Hide" : "Show"} older jobs ({olderCount})
+            </ThreadDetailsControl>
+          )}
+          {hasMore && (
+            <ThreadDetailsControl
+              tone="muted"
+              disabled={isPending}
+              onClick={() => {
+                setExpanded(true);
+                loadOlder();
+              }}
+            >
+              Load older jobs
+            </ThreadDetailsControl>
+          )}
+        </>
       )}
     </ThreadDetailsSection>
   );
