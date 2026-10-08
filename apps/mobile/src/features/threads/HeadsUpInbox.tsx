@@ -37,26 +37,33 @@ export function useHeadsUpInbox(
   const summary = useEnvironmentQuery(headsUpInbox.summary({ environmentId, input: {} }));
   const connection = useAtomValue(environmentCatalog.stateAtom(environmentId));
   const connected = Option.getOrNull(AsyncResult.value(connection))?.phase === "connected";
-  const count = summary.data?.unresolvedCount;
   const unreadCount = summary.data?.unreadCount;
   const highlight = (unreadCount ?? 0) > 0;
+  const badge =
+    !connected || summary.error
+      ? "!"
+      : unreadCount === undefined
+        ? "…"
+        : highlight
+          ? unreadCount
+          : null;
   const button = (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={`You should know${count === undefined ? ", loading" : `, ${count} unresolved, ${unreadCount ?? 0} unread`}${connected ? "" : ", disconnected"}`}
+      accessibilityLabel={`You should know${unreadCount === undefined ? ", loading" : `, ${unreadCount} unread`}${connected ? "" : ", disconnected"}`}
       accessibilityState={{ expanded: open }}
       onPress={() => setOpen(true)}
       className={`min-h-11 min-w-11 flex-row items-center justify-center gap-1 rounded-xl px-2 ${highlight ? "bg-subtle-strong" : "bg-transparent"}`}
     >
       <SymbolView name="lightbulb" size={20} tintColorClassName="accent-header-foreground" />
-      <Text className="text-xs font-t3-bold text-foreground-muted">
-        {connected && !summary.error ? (count ?? "…") : "!"}
-      </Text>
+      {badge !== null && (
+        <Text className="text-xs font-t3-bold text-foreground-muted">{badge}</Text>
+      )}
     </Pressable>
   );
   return {
     button,
-    revision: `${environmentId}:${count}:${connected}:${highlight}:${open}`,
+    revision: `${environmentId}:${unreadCount}:${connected}:${badge}:${open}`,
     modal: (
       <Modal
         visible={open}

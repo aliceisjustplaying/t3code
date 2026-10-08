@@ -42,10 +42,17 @@ export function HeadsUpInbox({
   const summary = useEnvironmentQuery(headsUpInbox.summary({ environmentId, input: {} }));
   const connection = useAtomValue(environmentCatalog.stateAtom(environmentId));
   const connected = Option.getOrNull(AsyncResult.value(connection))?.phase === "connected";
-  const count = summary.data?.unresolvedCount;
   const unreadCount = summary.data?.unreadCount;
   const highlight = (unreadCount ?? 0) > 0;
-  const label = `You should know${count === undefined ? ", loading" : `, ${count} unresolved, ${unreadCount ?? 0} unread`}${connected ? "" : ", disconnected"}`;
+  const badge =
+    !connected || summary.error
+      ? "!"
+      : unreadCount === undefined
+        ? "…"
+        : highlight
+          ? unreadCount
+          : null;
+  const label = `You should know${unreadCount === undefined ? ", loading" : `, ${unreadCount} unread`}${connected ? "" : ", disconnected"}`;
   return (
     <Dialog.Root open={open} onOpenChange={setOpen}>
       <Dialog.Trigger
@@ -60,11 +67,13 @@ export function HeadsUpInbox({
       >
         <LightbulbIcon aria-hidden="true" />
         {highlight ? <span className="text-xs font-medium">New</span> : null}
-        <span
-          className={`rounded px-1 text-xs tabular-nums transition-colors duration-300 motion-reduce:transition-none ${highlight ? "bg-warning/30 text-warning-foreground" : "bg-muted text-muted-foreground"}`}
-        >
-          {connected && !summary.error ? (count ?? "…") : "!"}
-        </span>
+        {badge !== null && (
+          <span
+            className={`rounded px-1 text-xs tabular-nums transition-colors duration-300 motion-reduce:transition-none ${highlight ? "bg-warning/30 text-warning-foreground" : "bg-muted text-muted-foreground"}`}
+          >
+            {badge}
+          </span>
+        )}
       </Dialog.Trigger>
       {open ? (
         <Dialog.Portal container={chatColumn ?? undefined}>
