@@ -1,6 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
 import { useNavigation } from "@react-navigation/native";
-import { appendHeadsUpFollowUp } from "@t3tools/client-runtime/heads-up";
+import { appendHeadsUpFollowUp, groupHeadsUpInbox } from "@t3tools/client-runtime/heads-up";
 import type {
   EnvironmentId,
   HeadsUpInboxEntry,
@@ -123,7 +123,6 @@ function InboxPages({
   readonly onDraftReady: () => void;
 }) {
   const [view, setView] = useState<HeadsUpInboxInput["view"]>("unresolved");
-  const [cursor, setCursor] = useState<string | undefined>();
   const [expanded, setExpanded] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -138,13 +137,12 @@ function InboxPages({
     };
   }, []);
   const summary = useEnvironmentQuery(headsUpInbox.summary({ environmentId, input: {} }));
-  const page = useEnvironmentQuery(
-    headsUpInbox.page({ environmentId, input: { view, limit: 30, ...(cursor ? { cursor } : {}) } }),
-  );
+  const page = useEnvironmentQuery(headsUpInbox.page({ environmentId, input: { view } }));
   const read = useAtomCommand(headsUpInbox.read, { reportFailure: false });
   const resolve = useAtomCommand(headsUpInbox.resolve, { reportFailure: false });
   const navigation = useNavigation();
   const items = page.data?.items;
+  const groups = groupHeadsUpInbox(items ?? []);
   useEffect(() => {
     if (!connected || !items) return;
     const unread = items.filter(
@@ -164,9 +162,8 @@ function InboxPages({
         if (mounted.current) setReadError(true);
       });
   }, [connected, environmentId, items, read]);
-  const changePage = (nextView: HeadsUpInboxInput["view"], nextCursor?: string) => {
+  const changeView = (nextView: HeadsUpInboxInput["view"]) => {
     setView(nextView);
-    setCursor(nextCursor);
     setExpanded(null);
     setActionError(null);
     setFeedback(null);
@@ -236,7 +233,7 @@ function InboxPages({
             key={tab}
             accessibilityRole="button"
             accessibilityState={{ selected: view === tab }}
-            onPress={() => changePage(tab)}
+            onPress={() => changeView(tab)}
             className={`min-h-11 justify-center px-3 ${view === tab ? "border-b-2 border-primary" : ""}`}
           >
             <Text className="text-sm capitalize text-foreground">
@@ -249,7 +246,7 @@ function InboxPages({
         ))}
       </View>
       <ScrollView
-        key={`${view}:${cursor ?? ""}`}
+        key={view}
         className="flex-1"
         contentContainerClassName="pb-4"
         accessibilityState={{ busy: page.isPending }}
@@ -282,152 +279,150 @@ function InboxPages({
         ) : null}
         {connected && !loadError && page.data?.items.length === 0 ? (
           <Text className="p-6 text-sm text-foreground-muted">
-            {cursor
-              ? "No notices on this page."
-              : view === "reviewed"
-                ? "No reviewed notices yet."
-                : "Nothing unresolved. Reviewed notices can be restored anytime."}
+            {view === "reviewed"
+              ? "No reviewed notices yet."
+              : "Nothing unresolved. Reviewed notices can be restored anytime."}
           </Text>
         ) : null}
-        {items?.map((entry) => (
-          <View key={entry.id} className="border-b border-border">
-            <Pressable
-              accessibilityRole="button"
-              accessibilityState={{ expanded: expanded === entry.id }}
-              onPress={() => setExpanded(expanded === entry.id ? null : entry.id)}
-              className={`gap-1 px-4 py-2 ${expanded === entry.id ? "bg-subtle" : ""}`}
+        {groups.map((group) => (
+          <View key={group.key}>
+            <Text
+              accessibilityRole="header"
+              className="border-b border-border px-4 py-2 text-sm font-t3-bold text-foreground"
             >
-              <View className="flex-row justify-between gap-3">
-                <Text className="text-xs text-foreground-muted">
-                  {entry.note.tag}
-                  {entry.readAt === null ? " · Unread" : ""}
-                </Text>
-                <Text className="shrink text-xs text-foreground-muted">
-                  {new Date(entry.createdAt).toLocaleString()}
-                </Text>
-              </View>
-              <Text
-                numberOfLines={expanded === entry.id ? undefined : 2}
-                className="text-sm font-t3-bold text-foreground"
-              >
-                {entry.note.line}
-              </Text>
-            </Pressable>
-            <View className="flex-row flex-wrap items-center gap-1 px-4 pb-2">
-              <View className="min-w-0 flex-1">
-                <Text
-                  numberOfLines={expanded === entry.id ? undefined : 1}
-                  className="text-xs text-foreground-muted"
+              {group.title}
+            </Text>
+            {group.items.map((entry) => (
+              <View key={entry.id} className="border-b border-border">
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityState={{ expanded: expanded === entry.id }}
+                  onPress={() => setExpanded(expanded === entry.id ? null : entry.id)}
+                  className={`gap-1 px-4 py-2 ${expanded === entry.id ? "bg-subtle" : ""}`}
                 >
-                  From {entry.sourceThreadTitle}
-                </Text>
-                {entry.note.resolution ? (
-                  <Text className="text-xs text-foreground-muted">
-                    {entry.note.resolution === "knew"
-                      ? "Knew"
-                      : entry.note.resolution === "dismiss"
-                        ? "Dismissed"
-                        : "Reviewed"}
-                  </Text>
-                ) : null}
-              </View>
-              <View className="w-full flex-row flex-wrap gap-2">
-                <RequestActionButton
-                  label="Ask agent · Draft"
-                  accessibilityLabel={`Ask agent · Draft: ${entry.note.line}`}
-                  disabled={!connected || busy !== null}
-                  onPress={(event) => {
-                    event.stopPropagation();
-                    void ask(entry);
-                  }}
-                />
-                {view === "reviewed" ? (
-                  <RequestActionButton
-                    label={
-                      entry.note.resolution === "dismiss" || entry.note.resolution === "knew"
-                        ? "Undo"
-                        : "Restore"
-                    }
-                    accessibilityLabel={`${entry.note.resolution === "dismiss" || entry.note.resolution === "knew" ? "Undo" : "Restore"} · Restore to unresolved: ${entry.note.line}`}
-                    tone="secondary"
-                    disabled={!connected || busy !== null}
-                    onPress={(event) => {
-                      event.stopPropagation();
-                      void act(entry, null);
-                    }}
-                  />
-                ) : (
-                  <>
-                    <RequestActionButton
-                      label="Dismiss"
-                      tone="secondary"
-                      disabled={!connected || busy !== null}
-                      accessibilityLabel={`Dismiss: ${entry.note.line}`}
-                      onPress={(event) => {
-                        event.stopPropagation();
-                        void act(entry, "dismiss");
-                      }}
-                    />
-                    <RequestActionButton
-                      label="Knew"
-                      tone="secondary"
-                      disabled={!connected || busy !== null}
-                      accessibilityLabel={`Knew: ${entry.note.line}`}
-                      onPress={(event) => {
-                        event.stopPropagation();
-                        void act(entry, "knew");
-                      }}
-                    />
-                  </>
-                )}
-              </View>
-              {busy === entry.id ? (
-                <Text accessibilityLiveRegion="polite" className="text-xs text-foreground-muted">
-                  Saving…
-                </Text>
-              ) : null}
-            </View>
-            {expanded === entry.id ? (
-              <View className="gap-2 bg-subtle px-4 py-2">
-                <MarkdownContent
-                  markdown={entry.note.explanation ?? "No additional explanation was supplied."}
-                />
-                <Text className="text-xs text-foreground-muted">
-                  Source: {entry.sourceThreadTitle}
-                  {"\n"}Draft target: {entry.targetThreadTitle}
-                </Text>
-                {entry.note.evidence ? (
-                  <>
-                    <Text className="text-xs font-t3-bold text-foreground">Evidence</Text>
-                    <Text
-                      selectable
-                      className="rounded-lg border border-border p-3 font-mono text-xs text-foreground"
-                    >
-                      {entry.note.evidence}
+                  <View className="flex-row justify-between gap-3">
+                    <Text className="text-xs text-foreground-muted">
+                      {entry.note.tag}
+                      {entry.readAt === null ? " · Unread" : ""}
                     </Text>
-                  </>
+                    <Text className="shrink text-xs text-foreground-muted">
+                      {new Date(entry.createdAt).toLocaleString()}
+                    </Text>
+                  </View>
+                  <Text
+                    numberOfLines={expanded === entry.id ? undefined : 2}
+                    className="text-sm font-t3-bold text-foreground"
+                  >
+                    {entry.note.line}
+                  </Text>
+                </Pressable>
+                <View className="flex-row flex-wrap items-center gap-1 px-4 pb-2">
+                  <View className="min-w-0 flex-1">
+                    <Text
+                      numberOfLines={expanded === entry.id ? undefined : 1}
+                      className="text-xs text-foreground-muted"
+                    >
+                      From {entry.sourceThreadTitle}
+                    </Text>
+                    {entry.note.resolution ? (
+                      <Text className="text-xs text-foreground-muted">
+                        {entry.note.resolution === "knew"
+                          ? "Knew"
+                          : entry.note.resolution === "dismiss"
+                            ? "Dismissed"
+                            : "Reviewed"}
+                      </Text>
+                    ) : null}
+                  </View>
+                  <View className="w-full flex-row flex-wrap gap-2">
+                    <RequestActionButton
+                      label="Ask agent · Draft"
+                      accessibilityLabel={`Ask agent · Draft: ${entry.note.line}`}
+                      disabled={!connected || busy !== null}
+                      onPress={(event) => {
+                        event.stopPropagation();
+                        void ask(entry);
+                      }}
+                    />
+                    {view === "reviewed" ? (
+                      <RequestActionButton
+                        label={
+                          entry.note.resolution === "dismiss" || entry.note.resolution === "knew"
+                            ? "Undo"
+                            : "Restore"
+                        }
+                        accessibilityLabel={`${entry.note.resolution === "dismiss" || entry.note.resolution === "knew" ? "Undo" : "Restore"} · Restore to unresolved: ${entry.note.line}`}
+                        tone="secondary"
+                        disabled={!connected || busy !== null}
+                        onPress={(event) => {
+                          event.stopPropagation();
+                          void act(entry, null);
+                        }}
+                      />
+                    ) : (
+                      <>
+                        <RequestActionButton
+                          label="Dismiss"
+                          tone="secondary"
+                          disabled={!connected || busy !== null}
+                          accessibilityLabel={`Dismiss: ${entry.note.line}`}
+                          onPress={(event) => {
+                            event.stopPropagation();
+                            void act(entry, "dismiss");
+                          }}
+                        />
+                        <RequestActionButton
+                          label="Knew"
+                          tone="secondary"
+                          disabled={!connected || busy !== null}
+                          accessibilityLabel={`Knew: ${entry.note.line}`}
+                          onPress={(event) => {
+                            event.stopPropagation();
+                            void act(entry, "knew");
+                          }}
+                        />
+                      </>
+                    )}
+                  </View>
+                  {busy === entry.id ? (
+                    <Text
+                      accessibilityLiveRegion="polite"
+                      className="text-xs text-foreground-muted"
+                    >
+                      Saving…
+                    </Text>
+                  ) : null}
+                </View>
+                {expanded === entry.id ? (
+                  <View className="gap-2 bg-subtle px-4 py-2">
+                    <MarkdownContent
+                      markdown={entry.note.explanation ?? "No additional explanation was supplied."}
+                    />
+                    <Text className="text-xs text-foreground-muted">
+                      Source: {entry.sourceThreadTitle}
+                      {"\n"}Draft target: {entry.targetThreadTitle}
+                    </Text>
+                    {entry.note.evidence ? (
+                      <>
+                        <Text className="text-xs font-t3-bold text-foreground">Evidence</Text>
+                        <Text
+                          selectable
+                          className="rounded-lg border border-border p-3 font-mono text-xs text-foreground"
+                        >
+                          {entry.note.evidence}
+                        </Text>
+                      </>
+                    ) : null}
+                    <Text className="text-xs text-foreground-muted">
+                      Ask agent adds the note to the target thread’s unsent draft and dismisses it
+                      from Unresolved. Nothing is sent.
+                    </Text>
+                  </View>
                 ) : null}
-                <Text className="text-xs text-foreground-muted">
-                  Ask agent adds the note to the target thread’s unsent draft and dismisses it from
-                  Unresolved. Nothing is sent.
-                </Text>
               </View>
-            ) : null}
+            ))}
           </View>
         ))}
-        <View className="flex-row gap-2 p-4">
-          {cursor ? (
-            <RequestActionButton label="Newest" tone="secondary" onPress={() => changePage(view)} />
-          ) : null}
-          {page.data?.nextCursor ? (
-            <RequestActionButton
-              label="Older notices"
-              tone="secondary"
-              disabled={!connected || page.isPending}
-              onPress={() => changePage(view, page.data?.nextCursor ?? undefined)}
-            />
-          ) : null}
-        </View>
       </ScrollView>
       {readError ? (
         <View className="gap-2 px-4 py-2">

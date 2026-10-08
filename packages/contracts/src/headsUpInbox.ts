@@ -3,6 +3,7 @@ import {
   IsoDateTime,
   NonNegativeInt,
   ProviderThreadId,
+  ProjectId,
   ThreadId,
   TurnItemId,
 } from "./baseSchemas.ts";
@@ -10,14 +11,14 @@ import { OrchestrationV2HeadsUp } from "./orchestrationV2.ts";
 
 export const HeadsUpInboxInput = Schema.Struct({
   view: Schema.Literals(["unresolved", "reviewed"]),
-  cursor: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(4096))),
-  limit: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 100 }))),
 });
 export type HeadsUpInboxInput = typeof HeadsUpInboxInput.Type;
 
 export const HeadsUpInboxEntry = Schema.Struct({
   /** Stable source identity, shared by a child notice and its forwarded copies. */
   id: Schema.String,
+  projectId: Schema.optionalKey(ProjectId),
+  projectTitle: Schema.optionalKey(Schema.String),
   threadId: ThreadId,
   turnItemId: TurnItemId,
   sourceThreadId: ThreadId,
@@ -41,13 +42,14 @@ export type HeadsUpInboxSummary = typeof HeadsUpInboxSummary.Type;
 export const HeadsUpInboxPage = Schema.Struct({
   ...HeadsUpInboxSummary.fields,
   items: Schema.Array(HeadsUpInboxEntry),
-  nextCursor: Schema.NullOr(Schema.String),
+  /** Always null; older connected clients require this field to decode the full list. */
+  nextCursor: Schema.optionalKey(Schema.Null),
 });
 export type HeadsUpInboxPage = typeof HeadsUpInboxPage.Type;
 export class HeadsUpInboxError extends Schema.TaggedError<HeadsUpInboxError>()(
   "HeadsUpInboxError",
   {
-    operation: Schema.Literals(["query", "cursor", "decode", "subscribe"]),
+    operation: Schema.Literals(["query", "decode", "subscribe"]),
     cause: Schema.Defect(),
   },
 ) {

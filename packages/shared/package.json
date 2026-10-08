@@ -458,6 +458,10 @@
     "./mcpApp": {
       "types": "./src/mcpApp.ts",
       "import": "./src/mcpApp.ts"
+    },
+    "./threadSortTimestamp": {
+      "types": "./src/threadSortTimestamp.ts",
+      "import": "./src/threadSortTimestamp.ts"
     }
   },
   "scripts": {

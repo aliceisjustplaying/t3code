@@ -60,7 +60,6 @@ vi.mock("../../state/query", async () => {
                     },
                   },
                 ],
-                nextCursor: null,
               }
             : { unreadCount: state.acknowledged ? 0 : 1, unresolvedCount: 1, reviewedCount: 1 },
         isPending: query === "page" && state.pending,
@@ -200,7 +199,7 @@ it("Reviewed restores inline, and failed actions stay available for retry", asyn
 it("read-triggered refreshes do not insert a banner ahead of mounted rows in either view", async () => {
   await openInbox();
   const row = document.querySelector('button[aria-controls="ysk-notice"]')!;
-  const section = row.closest("section")!;
+  const section = row.closest("section[aria-label]")!;
   expect(row.textContent).toContain("Unread");
   const contentBefore = section.parentElement!.textContent;
   state.pending = true;
@@ -212,10 +211,10 @@ it("read-triggered refreshes do not insert a banner ahead of mounted rows in eit
   state.pending = false;
   await act(async () => button("reviewed (1)").click());
   const reviewed = document.querySelector('button[aria-controls="ysk-notice"]')!;
-  const reviewedContent = reviewed.closest("section")!.parentElement!.textContent;
+  const reviewedContent = reviewed.closest("section[aria-label]")!.parentElement!.textContent;
   state.pending = true;
   await render();
-  const reviewedSection = reviewed.closest("section")!;
+  const reviewedSection = reviewed.closest("section[aria-label]")!;
   expect(reviewedSection.parentElement!.getAttribute("aria-busy")).toBe("true");
   expect(reviewedSection.parentElement!.textContent).toBe(reviewedContent);
   expect(reviewedSection.parentElement!.firstElementChild).toBe(reviewedSection);

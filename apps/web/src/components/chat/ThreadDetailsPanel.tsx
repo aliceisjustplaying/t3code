@@ -177,6 +177,7 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
 
           {!props.draftId ? (
             <ThreadJobsPanel
+              key={`${props.environmentId}:${props.threadId}`}
               environmentId={props.environmentId}
               threadId={props.threadId}
               onSelect={props.onSelectJob}

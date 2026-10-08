@@ -1,7 +1,12 @@
-import { ThreadId, TurnItemId, type HeadsUpInboxEntry } from "@t3tools/contracts";
+import { ProjectId, ThreadId, TurnItemId, type HeadsUpInboxEntry } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { appendHeadsUpFollowUp, headsUpChatMessage, pendingHeadsUps } from "./headsUp.ts";
+import {
+  appendHeadsUpFollowUp,
+  headsUpChatMessage,
+  pendingHeadsUps,
+  groupHeadsUpInbox,
+} from "./headsUp.ts";
 
 const notice = (id: string, resolution?: "knew") =>
   ({
@@ -68,4 +73,29 @@ it("preserves an unsent draft and appends the original YSK quote without routing
     "Here is a note offered by a side agent:\n> Heads up · Stale cache\n> Evidence: cache.ts:12\n>\n> The TTL is wrong.";
   expect(draft).toBe(`${original}\n\n${quote}`);
   expect(appendHeadsUpFollowUp("", entry)).toBe(quote);
+});
+
+it("groups server-ordered projects without changing notice identity or ordering", () => {
+  const entry = (id: string, project: string): HeadsUpInboxEntry => ({
+    id,
+    projectId: ProjectId.make(project),
+    projectTitle: project,
+    threadId: ThreadId.make(id),
+    sourceThreadId: ThreadId.make(id),
+    sourceThreadTitle: id,
+    targetThreadId: ThreadId.make(id),
+    targetThreadTitle: id,
+    turnItemId: TurnItemId.make(id),
+    providerThreadId: null,
+    createdAt: "2026-10-06T00:00:00.000Z",
+    readAt: null,
+    note: { noteId: id, tag: "Heads up", line: id },
+  });
+  const items = [entry("b1", "B"), entry("b2", "B"), entry("a1", "A")];
+  const groups = groupHeadsUpInbox(items);
+  expect(groups.map((group) => [group.title, group.items.map((item) => item.id)])).toEqual([
+    ["B", ["b1", "b2"]],
+    ["A", ["a1"]],
+  ]);
+  expect(groups[0]?.items[0]).toBe(items[0]);
 });

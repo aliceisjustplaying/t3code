@@ -95,7 +95,7 @@ afterEach(async () => {
   container?.remove();
   vi.unstubAllGlobals();
 });
-it("loads older persisted summaries on demand and keeps their destination environment", async () => {
+it("starts collapsed, toggles jobs and loads older summaries in their destination environment", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   state.items = [];
   state.calls = [];
@@ -126,10 +126,17 @@ it("loads older persisted summaries on demand and keeps their destination enviro
     [...container!.querySelectorAll<HTMLButtonElement>("button[title]")].map(
       (button) => button.title,
     );
+  const sectionToggle = () =>
+    [...container!.querySelectorAll<HTMLButtonElement>("button")].find((button) =>
+      button.textContent?.startsWith("Jobs"),
+    )!;
+  expect(names()).toEqual([]);
+  expect(sectionToggle().textContent).toContain("Jobs (5+)");
+  await act(async () => sectionToggle().click());
   expect(names()).toEqual(["Job 6", "Job 5", "Job 4", "Job 3", "Job 2"]);
   const toggle = () =>
     [...container!.querySelectorAll<HTMLButtonElement>("button")].find((button) =>
-      button.hasAttribute("aria-expanded"),
+      button.textContent?.includes("older jobs ("),
     )!;
   const load = [...container!.querySelectorAll<HTMLButtonElement>("button")].find(
     (button) => button.textContent === "Load older jobs",
@@ -145,5 +152,10 @@ it("loads older persisted summaries on demand and keeps their destination enviro
     ),
   ).toBe(true);
   await act(async () => toggle().click());
+  expect(names()).toEqual(["Job 6", "Job 5", "Job 4", "Job 3", "Job 2"]);
+  await act(async () => sectionToggle().click());
+  expect(names()).toEqual([]);
+  expect(sectionToggle().textContent).toContain("Jobs (6)");
+  await act(async () => sectionToggle().click());
   expect(names()).toEqual(["Job 6", "Job 5", "Job 4", "Job 3", "Job 2"]);
 });
