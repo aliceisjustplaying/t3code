@@ -211,14 +211,24 @@ function createMcpClient(endpoint: string, token: string) {
 
 export default async function t3McpExtension(pi: ExtensionAPI) {
   pi.registerCommand("t3-background-work", {
-    description: "Report pending extension work to the T3 session manager",
+    description: "Report completion-blocking work and retained services to the T3 session manager",
     handler: async (_args, ctx) => {
       const globals = globalThis as unknown as Record<symbol, unknown>;
       const keepalive = globals[Symbol.for("pi-subagents/keepalive")];
       const runtime = globals[Symbol.for("pi-subagents/runtime")] as { runningSubagents?: Map<unknown, unknown> } | undefined;
-      const pending = (keepalive instanceof Set && keepalive.size > 0) ||
-        (runtime?.runningSubagents instanceof Map && runtime.runningSubagents.size > 0);
-      ctx.ui.setStatus("t3:background-work", pending ? "pending" : "idle");
+      const work = globals[Symbol.for("pi-wake/background-work")];
+      let pending = runtime?.runningSubagents instanceof Map && runtime.runningSubagents.size > 0;
+      let retained = false;
+      if (keepalive instanceof Set) {
+        for (const key of keepalive) {
+          const entry = work instanceof Map ? work.get(key) as { completionBlocking?: boolean; retained?: boolean } | undefined : undefined;
+          // Only explicit metadata may exempt a key. Old extensions and foreign
+          // keepalives remain completion-blocking, even beside a ready service.
+          if (entry?.completionBlocking !== false) pending = true;
+          if (entry?.retained === true) retained = true;
+        }
+      }
+      ctx.ui.setStatus("t3:background-work", JSON.stringify({ pending, retained }));
     },
   });
   // Workaround for an upstream Pi context-budgeting bug: pi-ai reuses the

@@ -116,7 +116,7 @@ interface FakePi {
   readonly failNextCommands: () => void;
   /** Close the fake process stdout stream. */
   readonly closeStdout: Effect.Effect<void>;
-  readonly setBackgroundWork: (pending: boolean) => void;
+  readonly setBackgroundWork: (pending: boolean, retained?: boolean) => void;
   readonly lastSpawn: () => {
     readonly args: ReadonlyArray<string>;
     readonly env: NodeJS.ProcessEnv;
@@ -156,7 +156,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   const statsQueue: Array<unknown> = [];
   const commandsQueue: Array<{ readonly success: boolean; readonly data?: unknown }> = [];
   const allRequests: Array<PiRpcRecord> = [];
-  let backgroundWork = false;
+  let backgroundWork: string = "idle";
   let deferState = false;
   let deferredStateRequest: PiRpcRecord | undefined;
   let failState = false;
@@ -250,7 +250,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
             type: "extension_ui_request",
             method: "setStatus",
             statusKey: "t3:background-work",
-            statusText: backgroundWork ? "pending" : "idle",
+            statusText: backgroundWork,
           });
         }
         const response = respondTo(record);
@@ -336,8 +336,13 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
     queueStats: (data) => statsQueue.push(data),
     queueCommands: (data) => commandsQueue.push({ success: true, data }),
     failNextCommands: () => commandsQueue.push({ success: false }),
-    setBackgroundWork: (pending) => {
-      backgroundWork = pending;
+    setBackgroundWork: (pending, retained) => {
+      backgroundWork =
+        retained === undefined
+          ? pending
+            ? "pending"
+            : "idle"
+          : JSON.stringify({ pending, retained });
     },
     closeStdout: Queue.end(stdout),
     lastSpawn: () => lastSpawn,
@@ -1445,6 +1450,45 @@ describe("PiAdapterV2", () => {
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect(
+    "retains service sessions without blocking completion after readiness and wake consumption",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const { runtime, takeEvent } = yield* openRuntime(fake);
+        let providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        // Starting, held readiness wake, consumed readiness, later exit wake, consumed exit.
+        for (const [index, [pending, retained]] of [
+          [true, true],
+          [true, true],
+          [false, true],
+          [true, false],
+          [false, false],
+        ].entries()) {
+          fake.setBackgroundWork(pending!, retained);
+          yield* startTurn(runtime, providerThread, "default", [], "Work", undefined, index + 1);
+          yield* fake.emit({ type: "agent_start" });
+          yield* fake.emit({ type: "agent_settled" });
+          while (true) {
+            const event = yield* takeEvent(() => true);
+            if (event.type === "provider_thread.updated") providerThread = event.providerThread;
+            if (event.type === "turn.terminal") break;
+          }
+          assert.equal((providerThread.pendingBackgroundTasks?.length ?? 0) > 0, pending);
+          assert.equal(yield* runtime.hasPendingBackgroundWork!, pending);
+          assert.equal(yield* runtime.hasRetainedBackgroundServices!, retained);
+        }
+        // Pi's own queue is authoritative for messages already handed to it.
+        fake.setBackgroundWork(false, true);
+        fake.queueState({ pendingMessageCount: 1 });
+        assert.isTrue(yield* runtime.hasPendingBackgroundWork!);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect("pins idle sessions despite an MCP warning and releases when extension work ends", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
@@ -1469,6 +1513,7 @@ describe("PiAdapterV2", () => {
           statusText: pending ? "pending" : "idle",
         });
         assert.equal(yield* Fiber.join(probe), pending);
+        assert.isFalse(yield* runtime.hasRetainedBackgroundServices!);
       }
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );

@@ -550,6 +550,8 @@ export interface ProviderAdapterV2SessionRuntime {
    * here so the session manager defers idle release while it is pending.
    */
   readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
+  /** Explicit persistent services retain an idle runtime without the finite-work pin cap. */
+  readonly hasRetainedBackgroundServices?: Effect.Effect<boolean>;
   /**
    * Per-provider-thread pending work for root-run ingestion stop gates. When
    * present, RunExecutionService uses only this probe (never the session-wide

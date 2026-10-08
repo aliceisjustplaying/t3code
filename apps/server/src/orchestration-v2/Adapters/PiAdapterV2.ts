@@ -103,6 +103,11 @@ const PI_DRIVER_KIND = PI_PROVIDER;
 const PI_DEFAULT_INSTANCE_ID = defaultInstanceIdForDriver(PI_DRIVER_KIND);
 const decodeJob = Schema.decodeUnknownOption(OrchestrationV2Job);
 const decodeJobJson = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
+const PiBackgroundWork = Schema.Struct({ pending: Schema.Boolean, retained: Schema.Boolean });
+const decodeBackgroundWorkJson = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(PiBackgroundWork),
+);
+const unknownBackgroundWork = { pending: true, retained: false };
 
 const DEFAULT_PI_SETTINGS = Schema.decodeSync(PiSettings)({});
 
@@ -491,7 +496,7 @@ export function makePiAdapterV2(
       // dialog's own resolution updates.
       const sessionEventPermit = yield* Semaphore.make(1);
       let threadState: PiThreadState | null = null;
-      let backgroundProbe: Deferred.Deferred<boolean> | undefined;
+      let backgroundProbe: Deferred.Deferred<typeof PiBackgroundWork.Type> | undefined;
       const backgroundProbePermit = yield* Semaphore.make(1);
       let noticeOrdinal = 0;
       const jobs = new Map<string, Extract<OrchestrationV2TurnItem, { type: "system_notice" }>>();
@@ -1333,10 +1338,14 @@ export function makePiAdapterV2(
         }
         if (method === "setStatus" && recordString(event, "statusKey") === "t3:background-work") {
           if (backgroundProbe !== undefined) {
-            yield* Deferred.succeed(
-              backgroundProbe,
-              recordString(event, "statusText") === "pending",
-            );
+            const text = recordString(event, "statusText");
+            const work =
+              text === "pending" || text === "idle"
+                ? { pending: text === "pending", retained: false }
+                : yield* decodeBackgroundWorkJson(text).pipe(
+                    Effect.orElseSucceed(() => unknownBackgroundWork),
+                  );
+            yield* Deferred.succeed(backgroundProbe, work);
           }
           return;
         }
@@ -1748,7 +1757,8 @@ export function makePiAdapterV2(
         );
       };
 
-      // The keepalive includes held wake-ups, not just running processes.
+      // Completion blockers include held/unconsumed wakes. Retained services
+      // keep the native runtime alive without entering the completion roster.
       // Status replies have no request ID, so serialize probes. The event pump
       // must remain free to receive the reply while a probe awaits it.
       const probeBackgroundWork = backgroundProbePermit.withPermits(1)(
@@ -1756,7 +1766,7 @@ export function makePiAdapterV2(
           const state = threadState;
           const providerThread = state?.providerThread;
           const generation = wakeGeneration;
-          if (sessionClosed || replacingNativeSession) return true;
+          if (sessionClosed || replacingNativeSession) return unknownBackgroundWork;
           const commands = recordField(yield* request({ type: "get_commands" }, 2_000), "commands");
           if (
             !Array.isArray(commands) ||
@@ -1766,12 +1776,13 @@ export function makePiAdapterV2(
                 recordString(command, "source") === "extension",
             )
           )
-            return false;
-          if (sessionClosed || replacingNativeSession || generation !== wakeGeneration) return true;
-          const probe = yield* Deferred.make<boolean>();
+            return { pending: false, retained: false };
+          if (sessionClosed || replacingNativeSession || generation !== wakeGeneration)
+            return unknownBackgroundWork;
+          const probe = yield* Deferred.make<typeof PiBackgroundWork.Type>();
           backgroundProbe = probe;
           yield* request({ type: "prompt", message: "/t3-background-work" }, 2_000);
-          const pending = yield* Deferred.await(probe);
+          const work = yield* Deferred.await(probe);
           // Idle lifecycle changes have no turn settlement to refresh this row.
           // Do not apply an old snapshot across a new turn or thread switch.
           yield* sessionEventPermit.withPermits(1)(
@@ -1786,16 +1797,16 @@ export function makePiAdapterV2(
                 state.providerThread !== providerThread
               )
                 return;
-              yield* updateBackgroundWork(state, pending || wake !== null);
+              yield* updateBackgroundWork(state, work.pending || wake !== null);
             }),
           );
-          return pending;
+          return work;
         }).pipe(
           Effect.timeoutOrElse({
             duration: Duration.seconds(5),
-            orElse: () => Effect.succeed(true),
+            orElse: () => Effect.succeed(unknownBackgroundWork),
           }),
-          Effect.catchCause(() => Effect.succeed(true)),
+          Effect.catchCause(() => Effect.succeed(unknownBackgroundWork)),
           Effect.ensuring(
             Effect.sync(() => {
               backgroundProbe = undefined;
@@ -1812,9 +1823,9 @@ export function makePiAdapterV2(
         const providerTurnId = turn.providerTurn.id;
         const settleProbeGeneration = turn.settleProbeGeneration;
         return Effect.gen(function* () {
-          const pendingBackgroundWork = yield* probeBackgroundWork;
+          const work = yield* probeBackgroundWork;
           const data = yield* request({ type: "get_state" }, 2_000);
-          return { data, pendingBackgroundWork };
+          return { data, pendingBackgroundWork: work.pending };
         }).pipe(
           Effect.matchEffect({
             onSuccess: ({ data, pendingBackgroundWork }) =>
@@ -2634,11 +2645,14 @@ export function makePiAdapterV2(
           return sessionEntity;
         },
         events: Stream.fromQueue(events),
+        hasRetainedBackgroundServices: probeBackgroundWork.pipe(
+          Effect.map((work) => work.retained),
+        ),
         hasPendingBackgroundWork: Effect.gen(function* () {
-          const pending = yield* probeBackgroundWork;
+          const work = yield* probeBackgroundWork;
           const state = yield* request({ type: "get_state" }, 2_000);
           return (
-            pending ||
+            work.pending ||
             wake !== null ||
             recordField(state, "isStreaming") === true ||
             recordField(state, "isCompacting") === true ||

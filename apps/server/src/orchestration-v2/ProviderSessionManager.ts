@@ -640,7 +640,10 @@ export const layerWithOptions = (
         readonly threadIds: Iterable<ThreadId>;
         readonly type: "provider-session.attached" | "provider-session.updated";
         readonly payload: OrchestrationV2ProviderSession;
-        readonly releasedThreadIds?: Iterable<ThreadId>;
+        readonly release?: {
+          readonly threadIds: Iterable<ThreadId>;
+          readonly occurredAt: DateTime.Utc;
+        };
       }) =>
         Effect.gen(function* () {
           const now = yield* DateTime.now;
@@ -660,9 +663,44 @@ export const layerWithOptions = (
               } satisfies OrchestrationV2DomainEvent;
             }),
           );
+          const releasedProviderThreads: Array<OrchestrationV2DomainEvent> = [];
+          // Background rosters belong to a process, not its settled turns. Only
+          // actual release clears them; an adapter's recoverable error does not.
+          if (input.release !== undefined) {
+            for (const threadId of input.release.threadIds) {
+              const { providerThreads } = yield* projectionStore.getThreadRecords(threadId, [
+                "providerThreads",
+              ]);
+              for (const thread of providerThreads) {
+                if (
+                  thread.providerSessionId !== input.runtime.providerSessionId ||
+                  DateTime.isGreaterThan(thread.updatedAt, input.release.occurredAt) ||
+                  (thread.pendingBackgroundTasks?.length ?? 0) === 0
+                )
+                  continue;
+                releasedProviderThreads.push({
+                  id: yield* idAllocator.allocate.event({
+                    threadId,
+                    providerSessionId: input.runtime.providerSessionId,
+                  }),
+                  type: "provider-thread.updated",
+                  threadId,
+                  driver: thread.driver,
+                  providerInstanceId: thread.providerInstanceId,
+                  occurredAt: now,
+                  payload: {
+                    ...thread,
+                    status: thread.status === "active" ? "idle" : thread.status,
+                    pendingBackgroundTasks: [],
+                    updatedAt: now,
+                  },
+                });
+              }
+            }
+          }
           const releasedJobs: Array<OrchestrationV2DomainEvent> = [];
-          if (input.runtime.stopJob !== undefined && input.releasedThreadIds !== undefined) {
-            const threadIds = new Set(input.releasedThreadIds);
+          if (input.runtime.stopJob !== undefined && input.release !== undefined) {
+            const threadIds = new Set(input.release.threadIds);
             for (const threadId of [...threadIds]) {
               const thread = yield* projectionStore.getThread(threadId);
               if (
@@ -704,8 +742,18 @@ export const layerWithOptions = (
               }
             }
           }
-          if (events.length > 0 || releasedJobs.length > 0) {
-            yield* eventSink.write({ events: [...events, ...releasedJobs] });
+          if (events.length > 0 || releasedProviderThreads.length > 0 || releasedJobs.length > 0) {
+            yield* eventSink.write({
+              events: [...events, ...releasedProviderThreads, ...releasedJobs],
+              ...(input.release === undefined
+                ? {}
+                : {
+                    releasedProviderThreadOwner: {
+                      providerSessionId: input.runtime.providerSessionId,
+                      cutoff: input.release.occurredAt,
+                    },
+                  }),
+            });
           }
         });
 
@@ -714,6 +762,8 @@ export const layerWithOptions = (
         readonly detachedThreadIds?: ReadonlyArray<ThreadId>;
         readonly reason: ProviderSessionReleaseReason;
         readonly detail?: string;
+        readonly releasedAt: DateTime.Utc;
+        readonly replaced: boolean;
       }) =>
         Effect.gen(function* () {
           const now = yield* DateTime.now;
@@ -728,13 +778,16 @@ export const layerWithOptions = (
           };
           yield* writeProviderSessionEvents({
             runtime: input.entry.runtime,
-            threadIds: input.entry.attachedThreadIds,
+            threadIds: input.replaced ? [] : input.entry.attachedThreadIds,
             type: "provider-session.updated",
             payload,
-            releasedThreadIds: new Set([
-              ...input.entry.attachedThreadIds,
-              ...(input.detachedThreadIds ?? []),
-            ]),
+            release: {
+              threadIds: new Set([
+                ...input.entry.attachedThreadIds,
+                ...(input.detachedThreadIds ?? []),
+              ]),
+              occurredAt: input.releasedAt,
+            },
           });
         });
 
@@ -847,7 +900,7 @@ export const layerWithOptions = (
       // Records a released session as stopped and resolves the live runtime
       // requests it left. Each write runs even if the other fails. Once a
       // replacement session opens with the same id, it owns the session status,
-      // so only the requests are settled.
+      // so roster cleanup remains guarded while only old session status is suppressed.
       const writeReleaseRecords = (input: {
         readonly entry: LiveSessionEntry;
         readonly detachedThreadIds?: ReadonlyArray<ThreadId>;
@@ -858,9 +911,7 @@ export const layerWithOptions = (
       }) =>
         Effect.all(
           [
-            input.replaced
-              ? Effect.succeed(Exit.void)
-              : Effect.exit(writeReleasedSessionEvents(input)),
+            Effect.exit(writeReleasedSessionEvents(input)),
             Effect.exit(
               writeReleasedRuntimeRequestEvents(input).pipe(
                 input.entry.requestEventPermit.withPermits(1),
@@ -1144,10 +1195,16 @@ export const layerWithOptions = (
               : yield* probedRuntime.hasPendingBackgroundWork.pipe(
                   Effect.catchCause(() => Effect.succeed(false)),
                 );
-          if (hasPendingWork) {
+          const hasRetainedServices =
+            probedRuntime.hasRetainedBackgroundServices === undefined
+              ? false
+              : yield* probedRuntime.hasRetainedBackgroundServices.pipe(
+                  Effect.catchCause(() => Effect.succeed(false)),
+                );
+          if (hasPendingWork || hasRetainedServices) {
             const now = yield* Clock.currentTimeMillis;
             const pinnedSinceMs = entry.pinnedSinceMs ?? now;
-            if (now - pinnedSinceMs < maxIdlePinMs) {
+            if (hasRetainedServices || now - pinnedSinceMs < maxIdlePinMs) {
               const shouldContinuePin = yield* Ref.modify(sessions, (latest) => {
                 const latestEntry = latest.get(key);
                 if (
@@ -1159,7 +1216,10 @@ export const layerWithOptions = (
                   return [false, latest] as const;
                 }
                 const updated = new Map(latest);
-                updated.set(key, { ...latestEntry, pinnedSinceMs });
+                updated.set(key, {
+                  ...latestEntry,
+                  pinnedSinceMs: hasRetainedServices ? null : pinnedSinceMs,
+                });
                 return [true, updated] as const;
               });
               if (!shouldContinuePin) {
