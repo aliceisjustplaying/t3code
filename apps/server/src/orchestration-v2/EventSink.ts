@@ -4,6 +4,7 @@ import {
   OrchestrationV2DomainEvent,
   OrchestrationV2StoredEvent,
   ProviderThreadId,
+  type ProviderSessionId,
   RunAttemptId,
   RunId,
   RuntimeRequestId,
@@ -73,11 +74,19 @@ export type EventSinkV2Error = typeof EventSinkV2Error.Type;
  */
 export interface EventSinkV2Shape {
   readonly write: (input: {
+    readonly releasedProviderThreadOwner?: {
+      readonly providerSessionId: ProviderSessionId;
+      readonly cutoff: DateTime.Utc;
+    };
     readonly guardPendingUserInputCancellations?: boolean;
     readonly commandId?: CommandId;
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
   }) => Effect.Effect<ReadonlyArray<OrchestrationV2StoredEvent>, EventSinkV2Error>;
   readonly writeWithEffects: (input: {
+    readonly releasedProviderThreadOwner?: {
+      readonly providerSessionId: ProviderSessionId;
+      readonly cutoff: DateTime.Utc;
+    };
     readonly guardPendingUserInputCancellations?: boolean;
     readonly commandId?: CommandId;
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
@@ -365,6 +374,42 @@ const layerBase: Layer.Layer<
         }
       });
 
+    // Re-read in the commit transaction: a replacement can publish after release reads.
+    const guardReleasedProviderThreads = (
+      events: ReadonlyArray<OrchestrationV2DomainEvent>,
+      owner: NonNullable<Parameters<EventSinkV2Shape["write"]>[0]["releasedProviderThreadOwner"]>,
+    ) =>
+      Effect.gen(function* () {
+        const guarded: Array<OrchestrationV2DomainEvent> = [];
+        for (const event of events) {
+          if (event.type !== "provider-thread.updated") {
+            guarded.push(event);
+            continue;
+          }
+          const { providerThreads } = yield* projectionStore.getThreadRecords(event.threadId, [
+            "providerThreads",
+          ]);
+          const current = providerThreads.find((thread) => thread.id === event.payload.id);
+          if (
+            current === undefined ||
+            current.providerSessionId !== owner.providerSessionId ||
+            DateTime.isGreaterThan(current.updatedAt, owner.cutoff) ||
+            (current.pendingBackgroundTasks?.length ?? 0) === 0
+          )
+            continue;
+          guarded.push({
+            ...event,
+            payload: {
+              ...current,
+              status: current.status === "active" ? "idle" : current.status,
+              pendingBackgroundTasks: [],
+              updatedAt: event.occurredAt,
+            },
+          });
+        }
+        return guarded;
+      });
+
     const writeEffect = Effect.fn("orchestrationV2.EventSink.write")(function* (
       input: Parameters<EventSinkV2Shape["writeWithEffects"]>[0],
     ) {
@@ -376,10 +421,17 @@ const layerBase: Layer.Layer<
 
       return yield* commitThenPublish(
         Effect.gen(function* () {
+          const events =
+            input.releasedProviderThreadOwner === undefined
+              ? input.events
+              : yield* guardReleasedProviderThreads(
+                  input.events,
+                  input.releasedProviderThreadOwner,
+                );
           const normalized = yield* normalizeEvents(
             input.guardPendingUserInputCancellations === true
-              ? yield* guardUserInputCancellations(input.events)
-              : input.events,
+              ? yield* guardUserInputCancellations(events)
+              : events,
           );
           const committed = yield* eventStore.append({
             ...(input.commandId === undefined ? {} : { commandId: input.commandId }),

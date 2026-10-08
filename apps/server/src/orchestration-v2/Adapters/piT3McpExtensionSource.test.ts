@@ -103,5 +103,41 @@ it("reports native extension keepalives and clears the pin once work finishes", 
     context,
   );
   await handler!();
-  assert.deepEqual(statuses, ["idle", "pending", "pending", "idle"]);
+  assert.deepEqual(
+    statuses.map((text) => JSON.parse(text)),
+    [
+      { pending: false, retained: false },
+      { pending: true, retained: false },
+      { pending: true, retained: false },
+      { pending: false, retained: false },
+    ],
+  );
+  // Only known registry entries may opt out of completion; foreign/old
+  // keepalives and native children remain blocking beside a retained service.
+  for (const [script, expected] of [
+    [
+      'globalThis[Symbol.for("pi-subagents/keepalive")] = new Set(["service"]); globalThis[Symbol.for("pi-wake/background-work")] = new Map([["service", { completionBlocking: false, retained: true }]])',
+      { pending: false, retained: true },
+    ],
+    [
+      'globalThis[Symbol.for("pi-subagents/keepalive")].add("legacy")',
+      { pending: true, retained: true },
+    ],
+    [
+      'globalThis[Symbol.for("pi-subagents/keepalive")].delete("legacy"); globalThis[Symbol.for("pi-subagents/runtime")].runningSubagents.set("child", {})',
+      { pending: true, retained: true },
+    ],
+    [
+      'globalThis[Symbol.for("pi-subagents/runtime")].runningSubagents.clear(); globalThis[Symbol.for("pi-subagents/keepalive")].add("held"); globalThis[Symbol.for("pi-wake/background-work")].set("held", { completionBlocking: true, retained: false })',
+      { pending: true, retained: true },
+    ],
+    [
+      'globalThis[Symbol.for("pi-subagents/keepalive")].clear()',
+      { pending: false, retained: false },
+    ],
+  ] as const) {
+    NodeVM.runInContext(script, context);
+    await handler!();
+    assert.deepEqual(JSON.parse(statuses.at(-1)!), expected);
+  }
 });

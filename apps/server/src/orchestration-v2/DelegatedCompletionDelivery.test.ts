@@ -11,6 +11,7 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderSessionId,
   ProviderThreadId,
   RunId,
   ThreadId,
@@ -35,6 +36,9 @@ import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as EventSink from "./EventSink.ts";
+import * as EffectOutbox from "./EffectOutbox.ts";
+import * as ProviderRuntimeRecovery from "./ProviderRuntimeRecoveryService.ts";
+import * as Option from "effect/Option";
 import * as Orchestrator from "./Orchestrator.ts";
 import type { ProviderAdapterV2Shape } from "./ProviderAdapter.ts";
 import { continueRestartedRun } from "./RestartContinuation.ts";
@@ -102,7 +106,11 @@ const layerTestProviderInstanceRegistry = Layer.succeed(
   },
 );
 
-const layerTest = Layer.mergeAll(RuntimeLayer.layer, RuntimeLayer.layerEventSink).pipe(
+const layerTest = Layer.mergeAll(
+  RuntimeLayer.layer,
+  RuntimeLayer.layerEventSink,
+  EffectOutbox.layer,
+).pipe(
   Layer.provideMerge(RuntimeLayer.layerProjectService),
   Layer.provide(
     Layer.mock(WorkspacePaths.WorkspacePaths)({
@@ -799,7 +807,7 @@ const seedRestartCancelledChild = (input: {
   readonly completionWake: "always" | "settled_only";
   readonly continuationPending: boolean;
   /** "completed" seeds a settled turn whose background work the restart cancelled. */
-  readonly runStatus?: "cancelled" | "completed";
+  readonly runStatus?: "cancelled" | "completed" | "failed";
   readonly now: DateTime.Utc;
 }) =>
   Effect.gen(function* () {
@@ -1466,6 +1474,139 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
 });
 
 it.layer(layerTest)("delegated completion after background settlement", (it) => {
+  it.effect.each(["completed", "failed"] as const)(
+    "startup settles an existing %s child with a stale stopped-session roster without rerunning it",
+    (status) =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const recovery = yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("stale-roster-parent-" + status);
+        const projectId = ProjectId.make("stale-roster-project-" + status);
+        const runId = RunId.make("stale-roster-parent-run-" + status);
+        const rootNodeId = NodeId.make("stale-roster-root-" + status);
+        yield* seedParentWithTerminalTask({
+          threadId,
+          projectId,
+          runId,
+          rootNodeId,
+          taskId: NodeId.make("stale-roster-settled-" + status),
+          deliveryState: "delivered",
+          now,
+        });
+        const child = yield* seedRestartCancelledChild({
+          parentThreadId: threadId,
+          projectId,
+          parentRunId: runId,
+          rootNodeId,
+          name: "stale-roster-child-" + status,
+          completionWake: "always",
+          continuationPending: false,
+          runStatus: status,
+          now,
+        });
+        const providerSessionId = ProviderSessionId.make("stale-roster-session-" + status);
+        const providerThreadId = ProviderThreadId.make("stale-roster-provider-thread-" + status);
+        yield* sink.write({
+          commandId: reconcileCommandId("stale-roster-" + status),
+          events: [
+            {
+              id: EventId.make("stale-roster-session-" + status),
+              type: "provider-session.attached",
+              threadId: child.childThreadId,
+              occurredAt: now,
+              payload: {
+                id: providerSessionId,
+                driver,
+                providerInstanceId: modelSelection.instanceId,
+                status: "stopped",
+                cwd: `/workspace/${projectId}`,
+                model: modelSelection.model,
+                capabilities: CodexProviderCapabilitiesV2,
+                createdAt: now,
+                updatedAt: now,
+                lastError: null,
+              },
+            },
+            {
+              id: EventId.make("stale-roster-provider-thread-" + status),
+              type: "provider-thread.updated",
+              threadId: child.childThreadId,
+              occurredAt: now,
+              payload: {
+                id: providerThreadId,
+                driver,
+                providerInstanceId: modelSelection.instanceId,
+                providerSessionId,
+                appThreadId: child.childThreadId,
+                ownerNodeId: null,
+                nativeThreadRef: { driver, nativeId: "stale-native-" + status, strength: "strong" },
+                nativeConversationHeadRef: null,
+                status: "idle",
+                firstRunOrdinal: 1,
+                lastRunOrdinal: 1,
+                handoffIds: [],
+                forkedFrom: null,
+                createdAt: now,
+                updatedAt: now,
+                pendingBackgroundTasks: [{ taskId: "pi:background-work", kind: "background_task" }],
+              },
+            },
+            {
+              ...runEvent({
+                threadId: child.childThreadId,
+                runId: child.childRunId,
+                ordinal: 1,
+                status,
+                providerThreadId,
+                now,
+              }),
+              id: EventId.make("stale-roster-run-" + status),
+            },
+          ],
+        });
+        yield* orchestrator.recoverDelegatedTasks;
+        assert.equal(
+          (yield* orchestrator.getThreadProjection(threadId)).subagents.find(
+            (task) => task.id === child.taskId,
+          )?.status,
+          "running",
+        );
+        yield* recovery.recover;
+        yield* orchestrator.recoverDelegatedTasks;
+        const result = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(result.subagents.find((task) => task.id === child.taskId)?.status, status);
+        assert.isString(result.subagents.find((task) => task.id === child.taskId)?.result);
+        assert.equal(
+          result.contextTransfers.filter(
+            (transfer) =>
+              transfer.type === "subagent_result" &&
+              transfer.sourceThreadId === child.childThreadId,
+          ).length,
+          1,
+        );
+        assert.isTrue(
+          Option.isNone(yield* outbox.get("effect:restart-continuation:" + child.childRunId)),
+        );
+        yield* recovery.recover;
+        yield* orchestrator.recoverDelegatedTasks;
+        const recoveredChild = yield* orchestrator.getThreadProjection(child.childThreadId);
+        assert.equal(recoveredChild.runs.length, 1);
+        assert.equal(recoveredChild.runs[0]?.status, status);
+        assert.deepEqual(recoveredChild.providerThreads[0]?.pendingBackgroundTasks, []);
+        assert.equal(
+          (yield* orchestrator.getThreadProjection(threadId)).contextTransfers.filter(
+            (transfer) =>
+              transfer.type === "subagent_result" &&
+              transfer.sourceThreadId === child.childThreadId,
+          ).length,
+          1,
+        );
+      }),
+  );
+
   it.effect("automatically delivers a settled child's result once its last job roster clears", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
