@@ -11,6 +11,8 @@ import {
   type OrchestrationV2Actor,
   type OrchestrationV2Command,
   type OrchestrationV2GetTurnItemResult,
+  type OrchestrationV2GetJobsPageInput,
+  type OrchestrationV2GetJobsPageResult,
   type OrchestrationV2ServerCommand,
   type OrchestrationV2ConversationMessage,
   type OrchestrationV2CreationSource,
@@ -35,7 +37,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import * as Orchestrator from "./Orchestrator.ts";
-import { projectTurnItemForDetail } from "./WireProjection.ts";
+import { projectTurnItemForDetail, projectTurnItemForWire } from "./WireProjection.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 
 export type ThreadManagementSendMode = "auto" | "queue" | "steer" | "restart";
@@ -287,6 +289,9 @@ export interface ThreadManagementServiceShape {
     readonly threadId: ThreadId;
     readonly itemId: TurnItemId;
   }) => Effect.Effect<OrchestrationV2GetTurnItemResult, Orchestrator.OrchestratorV2Error>;
+  readonly getJobsPage: (
+    input: OrchestrationV2GetJobsPageInput,
+  ) => Effect.Effect<OrchestrationV2GetJobsPageResult, Orchestrator.OrchestratorV2Error>;
   readonly getThreadRecords: Orchestrator.OrchestratorV2["Service"]["getThreadRecords"];
   readonly getThreadProjection: (
     threadId: ThreadId,
@@ -806,6 +811,23 @@ const make = Effect.gen(function* () {
       ensureProjectionTranscript(input.threadId).pipe(
         Effect.andThen(orchestrator.getTurnItem(input)),
         Effect.map((item) => ({ item: item === null ? null : projectTurnItemForDetail(item) })),
+      ),
+    getJobsPage: (input) =>
+      ensureProjectionTranscript(input.threadId).pipe(
+        Effect.andThen(
+          orchestrator.getJobsPage(input.threadId, {
+            beforeJob: input.cursor ?? undefined,
+            limit: 25,
+          }),
+        ),
+        Effect.map((page) => {
+          const items = page.items.map(projectTurnItemForWire);
+          const last = items.at(-1);
+          return {
+            items,
+            nextCursor: page.hasMore && last ? { ordinal: last.ordinal, itemId: last.id } : null,
+          };
+        }),
       ),
     getThreadRecords: (threadId, fields, filter) =>
       ensureProjectionTranscript(threadId).pipe(

@@ -3514,6 +3514,7 @@ export function makeClaudeAdapterV2(
           readonly nativeThreadId: string;
           readonly providerThread: OrchestrationV2ProviderThread;
           readonly status?: OrchestrationV2ProviderThread["status"];
+          readonly runAttemptId?: ProviderAdapter.ProviderAdapterV2TurnInput["attemptId"];
         }) {
           const roster = rosterForNativeThread(
             yield* Ref.get(pendingBackgroundTasksByNativeThread),
@@ -3534,6 +3535,7 @@ export function makeClaudeAdapterV2(
           yield* emitProviderEvent({
             type: "provider_thread.updated",
             driver: CLAUDE_PROVIDER,
+            ...(input.runAttemptId === undefined ? {} : { runAttemptId: input.runAttemptId }),
             providerThread,
           });
         });
@@ -3565,6 +3567,7 @@ export function makeClaudeAdapterV2(
           yield* emitProviderEvent({
             type: "provider_thread.updated",
             driver: CLAUDE_PROVIDER,
+            runAttemptId: input.context.input.attemptId,
             providerThread: updated,
           });
         });
@@ -5203,6 +5206,7 @@ export function makeClaudeAdapterV2(
                 yield* emitProviderEvent({
                   type: "provider_thread.updated" as const,
                   driver: CLAUDE_PROVIDER,
+                  runAttemptId: input.context.input.attemptId,
                   providerThread,
                 });
               }),
@@ -5621,6 +5625,9 @@ export function makeClaudeAdapterV2(
             nativeThreadId: input.nativeThreadId,
             providerThread: baseThread,
             status,
+            ...(input.activeContext === null
+              ? {}
+              : { runAttemptId: input.activeContext.input.attemptId }),
           });
           return true;
         });

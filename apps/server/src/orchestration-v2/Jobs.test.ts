@@ -10,10 +10,12 @@ import {
   ProviderInstanceId,
   ProviderDriverKind,
   type OrchestrationV2TurnItem,
+  type OrchestrationV2GetJobsPageResult,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Statement from "effect/sql/Statement";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
@@ -25,6 +27,9 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
+import * as ThreadManagementService from "./ThreadManagementService.ts";
+import { buildBoundedThreadStreamSnapshot } from "./ThreadStream.ts";
+import { THREAD_HISTORY_PAGE_POLICY } from "./threadHistoryPaging.ts";
 import type { ProviderAdapterV2Shape } from "./ProviderAdapter.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 
@@ -202,13 +207,294 @@ it.effect(
       const recovery = yield* Recovery.ProviderRuntimeRecoveryService;
       yield* recovery.recover;
       const restored = yield* projections.getThreadSnapshotWindow(threadId, { rowLimit: 1 });
+      assert.isFalse(restored.projection.turnItems.some((candidate) => candidate.id === lostId));
       assert.equal(
-        restored.projection.turnItems.find((candidate) => candidate.id === lostId)?.status,
+        (yield* projections.getTurnItem({ threadId, itemId: lostId }))?.status,
         "cancelled",
       );
       assert.equal(
-        restored.projection.turnItems.find((candidate) => candidate.id === item.id)?.status,
+        (yield* projections.getTurnItem({ threadId, itemId: item.id }))?.status,
         "completed",
       );
+    }).pipe(Effect.provide(layer)),
+);
+
+const jobFixture = (
+  threadId: ThreadId,
+  ordinal: number,
+  now: DateTime.Utc,
+): Extract<OrchestrationV2TurnItem, { type: "system_notice" }> => ({
+  id: TurnItemId.make("job-" + ordinal),
+  threadId,
+  ordinal,
+  runId: null,
+  nodeId: null,
+  providerThreadId: ProviderThreadId.make("job-provider"),
+  providerTurnId: null,
+  nativeItemRef: null,
+  parentItemId: null,
+  status: ordinal < 2 ? "running" : "completed",
+  title: "Build " + ordinal,
+  startedAt: now,
+  completedAt: ordinal < 2 ? null : now,
+  updatedAt: now,
+  type: "system_notice",
+  message: "",
+  job: {
+    version: 1,
+    scope: "live-runtime",
+    id: String(ordinal + 1),
+    name: "Build " + ordinal,
+    command: "make",
+    cwd: "/tmp",
+    state: ordinal < 2 ? "running" : "succeeded",
+    startedAt: DateTime.toEpochMillis(now),
+    endedAt: ordinal < 2 ? null : DateTime.toEpochMillis(now),
+    exitCode: ordinal < 2 ? null : 0,
+    signal: null,
+    output: "界".repeat(16_000),
+    providerSessionId: ProviderSessionId.make("job-session"),
+    ...(ordinal % 2 ? { sourceThreadId: ThreadId.make("child"), sourceTitle: "Child" } : {}),
+  },
+});
+const createJobsThread = (
+  orchestrator: Orchestrator.OrchestratorV2["Service"],
+  threadId: ThreadId,
+) =>
+  orchestrator.dispatch({
+    type: "thread.create",
+    commandId: CommandId.make("create-" + threadId),
+    threadId,
+    projectId: ProjectId.make("jobs-project"),
+    title: "Jobs",
+    modelSelection: { instanceId, model: "default" },
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: null,
+    createdBy: "user",
+    creationSource: "web",
+  });
+
+it.effect(
+  "pages every persisted job including old forwarded summaries without transferring output until detail selection",
+  () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const service = yield* ThreadManagementService.ThreadManagementService;
+      const threadId = ThreadId.make("many-jobs");
+      const now = yield* DateTime.now;
+      yield* createJobsThread(orchestrator, threadId);
+      const memory = yield* ProjectionStore.ProjectionStoreV2.pipe(
+        Effect.provide(ProjectionStore.layerMemory),
+      );
+      yield* memory.apply({
+        id: EventId.make("memory-thread"),
+        type: "thread.created",
+        threadId,
+        occurredAt: now,
+        payload: (yield* projections.getThreadProjection(threadId)).thread,
+      });
+      for (let ordinal = 0; ordinal < 220; ordinal++) {
+        const event = {
+          id: EventId.make("job-" + ordinal),
+          type: "turn-item.updated" as const,
+          threadId,
+          occurredAt: now,
+          // Equal ordinals straddle the first page: the ID tie-breaker must not skip either job.
+          payload: {
+            ...jobFixture(threadId, ordinal, now),
+            ordinal: ordinal === 194 ? 195 : ordinal,
+            // SQLite orders these case-sensitive IDs differently from localeCompare.
+            id: TurnItemId.make(
+              ordinal === 194 ? "job-Z" : ordinal === 195 ? "job-a" : "job-" + ordinal,
+            ),
+          },
+        };
+        yield* projections.apply(event);
+        yield* memory.apply(event);
+      }
+      // Unrelated newer activity pushes all jobs outside the recent transcript.
+      for (let ordinal = 220; ordinal < 320; ordinal++) {
+        const { job: _job, ...notice } = jobFixture(threadId, ordinal, now);
+        yield* projections.apply({
+          id: EventId.make("notice-" + ordinal),
+          type: "turn-item.updated",
+          threadId,
+          occurredAt: now,
+          payload: { ...notice, message: "Newer activity" },
+        });
+      }
+      const window = yield* projections.getThreadSnapshotWindow(threadId, { rowLimit: 77 });
+      const snapshot = buildBoundedThreadStreamSnapshot(window);
+      const retained = snapshot.projection.turnItems.filter(
+        (item) => item.type === "system_notice" && item.job !== undefined,
+      );
+      assert.deepEqual(
+        retained.map((item) => item.id),
+        [TurnItemId.make("job-0"), TurnItemId.make("job-1")],
+      );
+      assert.isBelow(
+        Buffer.byteLength(JSON.stringify(snapshot), "utf8"),
+        THREAD_HISTORY_PAGE_POLICY.maxEncodedBytes,
+      );
+      assert.isFalse(snapshot.payloadBudgetExceeded);
+      assert.isTrue(snapshot.hasMoreHistory);
+      assert.notInclude(JSON.stringify(snapshot), "界");
+
+      const queries: Array<readonly [string, ReadonlyArray<unknown>]> = [];
+      const record: Statement.Transformer = (statement) =>
+        Effect.sync(() => {
+          queries.push(statement.compile());
+          return statement;
+        });
+      const all: OrchestrationV2TurnItem[] = [];
+      let cursor: import("@t3tools/contracts").OrchestrationV2GetJobsPageInput["cursor"] = null;
+      for (let pageNumber = 0; pageNumber < 10; pageNumber++) {
+        const page: OrchestrationV2GetJobsPageResult = yield* service
+          .getJobsPage({ threadId, cursor })
+          .pipe(Effect.provideService(Statement.CurrentTransformer, record));
+        const memoryPage = yield* memory.getJobsPage(threadId, {
+          beforeJob: cursor ?? undefined,
+          limit: 25,
+        });
+        assert.deepEqual(page.items, memoryPage.items);
+        assert.equal(page.nextCursor !== null, memoryPage.hasMore);
+        assert.isAtMost(page.items.length, 25);
+        assert.notInclude(JSON.stringify(page), "界");
+        all.push(...page.items);
+        cursor = page.nextCursor;
+        if (cursor === null) break;
+      }
+      assert.isNull(cursor);
+      // Every actual persisted jobs read is bounded and avoids a whole-history count.
+      const jobsQueries = queries.filter(([query]) => query.includes("$.job.id"));
+      assert.isNotEmpty(jobsQueries);
+      for (const [query, params] of jobsQueries) {
+        assert.notInclude(query.toUpperCase(), "COUNT(");
+        assert.include(query.toUpperCase(), "LIMIT");
+        assert.equal(params.at(-1), 26);
+      }
+      assert.deepEqual(
+        all.map((item) => item.id),
+        Array.from({ length: 220 }, (_, index) => {
+          const ordinal = 219 - index;
+          return TurnItemId.make(
+            ordinal === 194 ? "job-Z" : ordinal === 195 ? "job-a" : "job-" + ordinal,
+          );
+        }),
+      );
+      const forwarded = all.find((item) => item.id === TurnItemId.make("job-3"));
+      assert.equal(
+        forwarded?.type === "system_notice" ? forwarded.job?.sourceThreadId : null,
+        ThreadId.make("child"),
+      );
+      const detail = yield* service.getTurnItem({ threadId, itemId: TurnItemId.make("job-3") });
+      assert.equal(
+        detail.item?.type === "system_notice" ? detail.item.job?.output : null,
+        "界".repeat(16_000),
+      );
+      // Ordinary transcript paging also keeps the old record available.
+      const history = yield* projections.getThreadSnapshotWindow(threadId, {
+        rowLimit: 25,
+        anchorItemId: TurnItemId.make("job-3"),
+      });
+      assert.isTrue(
+        history.projection.visibleTurnItems.some(
+          (row) => row.sourceItemId === TurnItemId.make("job-3"),
+        ),
+      );
+      assert.notInclude(JSON.stringify(history), "界");
+    }).pipe(Effect.provide(ThreadManagementService.layer.pipe(Layer.provideMerge(layer)))),
+);
+
+it.effect(
+  "completion between Stop planning and commit cannot resurrect a job, and the accepted intent still queues one source-bound effect",
+  () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const threadId = ThreadId.make("stop-race");
+      const now = yield* DateTime.now;
+      yield* createJobsThread(orchestrator, threadId);
+      const active = jobFixture(threadId, 1, now);
+      const providerThreadId = active.providerThreadId;
+      if (providerThreadId === null) throw new Error("Active job fixture needs a provider thread");
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("race-start"),
+            type: "turn-item.updated",
+            threadId,
+            occurredAt: now,
+            payload: active,
+          },
+        ],
+      });
+      const completed: OrchestrationV2TurnItem = {
+        ...active,
+        status: "completed",
+        completedAt: now,
+        job: {
+          ...active.job!,
+          state: "succeeded",
+          exitCode: 0,
+          endedAt: DateTime.toEpochMillis(now),
+          output: "Final output",
+        },
+      };
+      const commit = sink.commitCommand;
+      // Inject direct provider ingestion at the existing sink boundary, after the
+      // real orchestrator planned Stop but before its transaction commits.
+      Object.assign(sink, {
+        commitCommand: (input: Parameters<typeof commit>[0]) =>
+          Effect.gen(function* () {
+            if (input.commandType === "thread.job.stop") {
+              yield* sink.write({
+                events: [
+                  {
+                    id: EventId.make("race-completed"),
+                    type: "turn-item.updated",
+                    threadId,
+                    occurredAt: now,
+                    payload: completed,
+                  },
+                ],
+              });
+            }
+            return yield* commit(input);
+          }),
+      });
+      const command = {
+        type: "thread.job.stop" as const,
+        commandId: CommandId.make("race-stop"),
+        threadId,
+        turnItemId: active.id,
+      };
+      const result = yield* orchestrator.dispatch(command);
+      assert.deepEqual(yield* projections.getTurnItem({ threadId, itemId: active.id }), completed);
+      assert.isTrue(
+        result.storedEvents.some(
+          ({ event }) =>
+            event.type === "turn-item.updated" &&
+            event.payload.parentItemId === active.id &&
+            event.payload.status === "completed",
+        ),
+      );
+      const effects = yield* outbox.listByCommandId(command.commandId);
+      assert.lengthOf(effects, 1);
+      assert.equal(effects[0]?.threadId, ThreadId.make("child"));
+      assert.deepEqual(effects[0]?.request, {
+        type: "provider-job.stop",
+        providerThreadId,
+        providerSessionId: active.job!.providerSessionId,
+        scope: active.job!.scope,
+        jobId: active.job!.id,
+      });
+      yield* orchestrator.dispatch(command);
+      assert.lengthOf(yield* outbox.listByCommandId(command.commandId), 1);
     }).pipe(Effect.provide(layer)),
 );

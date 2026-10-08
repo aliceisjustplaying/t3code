@@ -6,9 +6,11 @@ import {
   type OrchestrationV2AppThread,
   ProjectId,
   ProviderInstanceId,
+  ProviderThreadId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Fiber from "effect/Fiber";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -18,6 +20,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ServerConfig from "../config.ts";
 import { OrchestrationEffectRequestV2 } from "../orchestration-v2/EffectOutbox.ts";
+import * as EffectOutbox from "../orchestration-v2/EffectOutbox.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as EventStore from "../orchestration-v2/EventStore.ts";
 import * as IdAllocator from "../orchestration-v2/IdAllocator.ts";
@@ -483,4 +486,57 @@ it.effect("deletes a project without force once its imported threads were delete
       assert.isTrue(Option.isNone(yield* service.getById(projectId)));
     }).pipe(Effect.provide(layerServices));
   }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect(
+  "project removal durably cancels queued and running child feedback and signals after deletion commits",
+  () =>
+    Effect.gen(function* () {
+      const projectId = ProjectId.make("project:feedback-deletion");
+      const threadId = ThreadId.make("thread:project-feedback-deletion");
+      yield* seedProject(projectId);
+      yield* Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const service = yield* ProjectService.make;
+        yield* sink.write({ events: [nativeThreadCreated(projectId, threadId)] });
+        const commandId = CommandId.make("command:project-feedback");
+        const effects = ["running", "queued"].map((state) => ({
+          id: `effect:project-feedback:${state}`,
+          commandId,
+          threadId,
+          request: {
+            type: "provider-heads-up.answer" as const,
+            providerThreadId: ProviderThreadId.make("provider-thread:project-feedback"),
+            noteId: "n1",
+            resolution: "dismiss" as const,
+          },
+        }));
+        yield* outbox.enqueue(effects);
+        const claim = yield* outbox.claimNext({
+          workerId: "project-feedback-test",
+          leaseDurationMs: 30_000,
+        });
+        assert.isTrue(Option.isSome(claim));
+        if (Option.isNone(claim)) return assert.fail("Expected running feedback");
+        assert.equal(claim.value.id, effects[0]?.id);
+        const cancellation = yield* outbox
+          .awaitCancellation(claim.value.id)
+          .pipe(Effect.andThen(projections.getThread(threadId)), Effect.forkScoped);
+        const deleted = yield* service.delete({
+          commandId: CommandId.make("command:delete-feedback-project"),
+          projectId,
+          force: true,
+        });
+        assert.isNotNull(deleted.deletedAt);
+        // The waiter sees the committed source deletion, not an early signal.
+        assert.isNotNull((yield* Fiber.join(cancellation)).deletedAt);
+        assert.deepEqual(
+          (yield* outbox.listByCommandId(commandId)).map((effect) => effect.status),
+          ["cancelled", "cancelled"],
+        );
+        assert.isTrue(Option.isNone(yield* service.getById(projectId)));
+      }).pipe(Effect.provide(Layer.merge(layerServices, EffectOutbox.layer)));
+    }).pipe(Effect.provide(layerDatabase), Effect.scoped),
 );

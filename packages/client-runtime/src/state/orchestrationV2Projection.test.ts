@@ -10,6 +10,7 @@ import {
   ProviderInstanceId,
   NodeId,
   ProviderThreadId,
+  ProviderSessionId,
   ProviderTurnId,
   RunId,
   ThreadId,
@@ -456,4 +457,67 @@ it("updates loaded heads-up rows through review, read and restore without changi
     expect(projection.visibleTurnItems[0]).toBe(rows[0]);
     expect(projection.turnItems[2]).toBe(unrelated);
   }
+});
+
+it("retains old live Stop targets and their completion without importing missing finished history", () => {
+  const recent = commandItem("recent-job-history", "done", 100);
+  const projection = {
+    ...emptyProjection,
+    turnItems: [recent],
+    visibleTurnItems: [
+      {
+        position: 0,
+        visibility: "local" as const,
+        sourceThreadId: threadId,
+        sourceItemId: recent.id,
+        item: recent,
+      },
+    ],
+  };
+  const active: OrchestrationV2TurnItem = {
+    ...commandItem("old-live-job", "", 1),
+    type: "system_notice",
+    message: "",
+    status: "running",
+    completedAt: null,
+    job: {
+      version: 1,
+      scope: "live-runtime",
+      id: "1",
+      name: "Build",
+      command: "make",
+      cwd: "/tmp",
+      state: "running",
+      startedAt: 1,
+      endedAt: null,
+      exitCode: null,
+      signal: null,
+      output: "",
+      outputOmitted: true,
+      providerSessionId: ProviderSessionId.make("job-session"),
+    },
+  };
+  const options = { partialTimeline: true, latestLocalTurnOrdinal: 100 };
+  const event = (payload: OrchestrationV2TurnItem): OrchestrationV2DomainEvent => ({
+    id: EventId.make("job-reducer"),
+    type: "turn-item.updated",
+    threadId,
+    occurredAt: now,
+    payload,
+  });
+  const finished: OrchestrationV2TurnItem = {
+    ...active,
+    status: "completed",
+    completedAt: now,
+    job: { ...active.job!, state: "succeeded", exitCode: 0, endedAt: 2 },
+  };
+  expect(
+    applyOrchestrationV2ProjectionEvent(projection, event(finished), options)?.turnItems,
+  ).toEqual([recent]);
+  const running = applyOrchestrationV2ProjectionEvent(projection, event(active), options)!;
+  expect(running.turnItems.some((item) => item.id === active.id)).toBe(true);
+  const done = applyOrchestrationV2ProjectionEvent(running, event(finished), options)!;
+  expect(done.turnItems.find((item) => item.id === active.id)).toMatchObject({
+    job: { state: "succeeded" },
+  });
 });

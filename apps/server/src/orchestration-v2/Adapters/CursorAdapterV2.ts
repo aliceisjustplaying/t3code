@@ -2000,6 +2000,7 @@ export function makeCursorAdapterV2(
           yield* emitProviderEvent({
             type: "provider_thread.updated",
             driver: CursorAgentSdk.CURSOR_PROVIDER,
+            runAttemptId: input.context.input.attemptId,
             providerThread: {
               ...input.context.input.providerThread,
               providerSessionId: session.id,
@@ -2261,10 +2262,13 @@ export function makeCursorAdapterV2(
             yield* emitProviderEvent({
               type: "provider_thread.updated",
               driver: CursorAgentSdk.CURSOR_PROVIDER,
+              runAttemptId: turnInput.attemptId,
               providerThread: {
                 ...turnInput.providerThread,
                 providerSessionId: session.id,
                 status: "active",
+                firstRunOrdinal: turnInput.providerThread.firstRunOrdinal ?? turnInput.runOrdinal,
+                lastRunOrdinal: turnInput.runOrdinal,
                 updatedAt: startedAt,
               },
             });

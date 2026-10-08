@@ -320,9 +320,12 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
               }),
             );
           }
-          return;
         }
+        // A timed-out or interrupted request no longer has an owner. Its
+        // late reply must not enter the id-less prompt acknowledgement FIFO.
+        return;
       }
+      if (record["type"] === "response" && record["id"] !== undefined) return;
       yield* Queue.offer(events, record);
     });
 

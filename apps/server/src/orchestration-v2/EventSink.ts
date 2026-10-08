@@ -572,13 +572,30 @@ const layerBase: Layer.Layer<
             error: null,
           };
           yield* commandReceipts.upsert(receipt);
-          const cancelledEffectIds =
-            input.cancelUnsettledEffects === undefined
+          const cancelledEffectIds = [
+            ...(input.cancelUnsettledEffects === undefined
               ? []
               : yield* effectOutbox.cancelUnsettled({
                   threadId: input.threadId,
                   ...input.cancelUnsettledEffects,
-                });
+                })),
+          ];
+          // Both direct deletion and project removal commit thread.deleted here.
+          // Retire feedback in the same transaction, including already-running
+          // claims whose executor read the source before its deletion.
+          for (const threadId of new Set(
+            storedEvents
+              .filter((stored) => stored.event.type === "thread.deleted")
+              .map((stored) => stored.event.threadId),
+          )) {
+            cancelledEffectIds.push(
+              ...(yield* effectOutbox.cancelUnsettled({
+                threadId,
+                effectTypes: ["provider-heads-up.answer"],
+                reason: "The source thread was deleted.",
+              })),
+            );
+          }
           return { receipt, storedEvents, committed: true as const, cancelledEffectIds };
         }),
         (result) =>

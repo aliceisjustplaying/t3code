@@ -1,6 +1,8 @@
 import type { OrchestrationV2TurnItem } from "@t3tools/contracts";
 import { expect, it } from "vite-plus/test";
 
+import * as DateTime from "effect/DateTime";
+
 import { threadJobs } from "./jobs.ts";
 
 it("orders jobs newest-started first regardless of status", () => {
@@ -12,6 +14,7 @@ it("orders jobs newest-started first regardless of status", () => {
   ].map(({ id, ...job }) => ({
     id,
     type: "system_notice",
+    updatedAt: DateTime.makeUnsafe(0),
     status: "completed",
     job,
   })) as OrchestrationV2TurnItem[];

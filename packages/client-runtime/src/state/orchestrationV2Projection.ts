@@ -280,11 +280,16 @@ export function applyOrchestrationV2ProjectionEvent(
       };
     }
     case "turn-item.updated": {
-      // Jobs remain chat controls. Heads-ups use the environment inbox query.
+      // Only missing live Stop targets bypass history paging. Finished jobs and
+      // heads-ups have independent paged queries. Existing rows still update.
       if (
         partialTimeline &&
         !projection.turnItems.some((candidate) => candidate.id === event.payload.id) &&
-        !(event.payload.type === "system_notice" && event.payload.job !== undefined) &&
+        !(
+          event.payload.type === "system_notice" &&
+          event.payload.status === "running" &&
+          (event.payload.job?.state === "running" || event.payload.job?.state === "stopping")
+        ) &&
         shouldDropMissingPartialTurnItem(projection, event.payload, latestLocalTurnOrdinal)
       ) {
         return projection;

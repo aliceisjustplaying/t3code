@@ -178,7 +178,7 @@ describe("threadHistoryPaging", () => {
   });
 
   it.each([4, 21, 24])(
-    "retains old local and child jobs through the final wire snapshot with byte accounting (%i jobs)",
+    "retains only active local and child Stop targets without output (%i jobs)",
     (jobCount) => {
       const jobs = Array.from({ length: jobCount }, (_, index) => {
         const row = makeRow(index);
@@ -218,7 +218,14 @@ describe("threadHistoryPaging", () => {
       });
 
       expect(snapshot.projection.turnItems.filter((item) => item.type === "system_notice")).toEqual(
-        jobs.map((row) => row.item),
+        jobs
+          .filter((row) => row.item.status === "running")
+          .map((row) => ({
+            ...row.item,
+            ...(row.item.type === "system_notice" && row.item.job
+              ? { job: { ...row.item.job, output: "", outputOmitted: true } }
+              : {}),
+          })),
       );
       expect(
         snapshot.projection.visibleTurnItems.every((row) => row.item.type === "command_execution"),
@@ -226,21 +233,9 @@ describe("threadHistoryPaging", () => {
       expect(snapshot.hasMoreHistory).toBe(true);
       expect(snapshot.historyCursor).not.toBeNull();
       const bytes = Buffer.byteLength(JSON.stringify(snapshot.projection), "utf8");
-      if (jobCount === 24) {
-        // Control state alone exceeds the soft cap: report it, never lose Stop.
-        expect(bytes).toBeGreaterThan(THREAD_HISTORY_PAGE_POLICY.maxEncodedBytes);
-        expect(snapshot.payloadBudgetExceeded).toBe(true);
-        expect(snapshot.projection.visibleTurnItems).toHaveLength(1);
-      } else {
-        expect(bytes).toBeLessThanOrEqual(THREAD_HISTORY_PAGE_POLICY.maxEncodedBytes);
-        expect(snapshot.payloadBudgetExceeded).toBe(false);
-        expect(snapshot.projection.visibleTurnItems.length).toBeGreaterThan(1);
-        if (jobCount === 21) {
-          expect(snapshot.projection.visibleTurnItems.length).toBeLessThan(
-            THREAD_HISTORY_PAGE_POLICY.maxItems,
-          );
-        }
-      }
+      expect(bytes).toBeLessThanOrEqual(THREAD_HISTORY_PAGE_POLICY.maxEncodedBytes);
+      expect(snapshot.payloadBudgetExceeded).toBe(false);
+      expect(snapshot.projection.visibleTurnItems.length).toBeGreaterThan(1);
     },
   );
 

@@ -192,6 +192,7 @@ const makeTestRelay = Effect.fnUntraced(function* (
       }),
     ensureLegacyTranscript: unused,
     dispatch: unused,
+    getJobsPage: () => Effect.die("Unused jobs read"),
     getTimelinePage: () => Effect.die("Unused timeline read"),
     getMessageCount: () => Effect.die("unused message count"),
     getTurnItem: () => Effect.die("unused turn item read"),

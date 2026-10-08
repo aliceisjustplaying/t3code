@@ -9,6 +9,8 @@ import type { EnvironmentId, ThreadId, TurnItemId } from "@t3tools/contracts";
 import { useState } from "react";
 import { useThreadProjection } from "../../state/entities";
 import { threadEnvironment } from "../../state/threads";
+import { useThreadJobs } from "../../state/use-thread-jobs";
+import { useTurnItemDetail } from "../../state/queries";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { ThreadDetailsSection } from "./ThreadDetailsSection";
 import { ThreadDetailsControl } from "./ThreadDetailsControl";
@@ -26,10 +28,10 @@ import {
 
 type Target = { environmentId: EnvironmentId; threadId: ThreadId };
 function useJobs(target: Target) {
-  return threadJobs(
+  const items =
     useThreadProjection(scopeThreadRef(target.environmentId, target.threadId))?.projection
-      .turnItems ?? [],
-  );
+      .turnItems ?? [];
+  return useThreadJobs(target, items);
 }
 function JobDuration({ job }: { job: ThreadJob }) {
   return (
@@ -43,9 +45,9 @@ function JobDuration({ job }: { job: ThreadJob }) {
   );
 }
 export function ThreadJobsPanel(props: Target & { onSelect: (id: TurnItemId) => void }) {
-  const jobs = useJobs(props);
+  const { jobs, hasMore, isPending, error, loadOlder, refresh } = useJobs(props);
   const [expanded, setExpanded] = useState(false);
-  if (!jobs.length) return null;
+  if (!jobs.length && !isPending && !error) return null;
   const active = jobs.filter(jobIsActive).length;
   const olderCount = Math.max(0, jobs.length - 5);
   return (
@@ -78,6 +80,12 @@ export function ThreadJobsPanel(props: Target & { onSelect: (id: TurnItemId) => 
           </span>
         </ThreadDetailsControl>
       ))}
+      {isPending && <p className="text-xs text-muted-foreground">Loading jobs…</p>}
+      {error && (
+        <Button variant="ghost" onClick={refresh}>
+          Retry loading jobs
+        </Button>
+      )}
       {olderCount > 0 && (
         <ThreadDetailsControl
           tone="muted"
@@ -87,12 +95,31 @@ export function ThreadJobsPanel(props: Target & { onSelect: (id: TurnItemId) => 
           {expanded ? "Hide" : "Show"} older jobs ({olderCount})
         </ThreadDetailsControl>
       )}
+      {hasMore && (
+        <ThreadDetailsControl
+          tone="muted"
+          disabled={isPending}
+          onClick={() => {
+            setExpanded(true);
+            loadOlder();
+          }}
+        >
+          Load older jobs
+        </ThreadDetailsControl>
+      )}
     </ThreadDetailsSection>
   );
 }
 
 export function ThreadJobDetails(props: Target & { itemId: TurnItemId; onClose: () => void }) {
-  const job = useJobs(props).find((candidate) => candidate.turnItemId === props.itemId);
+  const items =
+    useThreadProjection(scopeThreadRef(props.environmentId, props.threadId))?.projection
+      .turnItems ?? [];
+  const liveJob = threadJobs(items).find((candidate) => candidate.turnItemId === props.itemId);
+  const detail = useTurnItemDetail({ ...props, revision: liveJob?.revision ?? "selected" });
+  const fetchedJob = threadJobs(detail.data?.item ? [detail.data.item] : [])[0];
+  const job =
+    liveJob && (!fetchedJob || liveJob.revision >= fetchedJob.revision) ? liveJob : fetchedJob;
   const stop = useAtomCommand(threadEnvironment.stopJob);
   const [confirm, setConfirm] = useState(false);
   const [pending, setPending] = useState(false);
@@ -104,6 +131,11 @@ export function ThreadJobDetails(props: Target & { itemId: TurnItemId; onClose: 
           <Button variant="ghost" onClick={props.onClose}>
             ← Back to thread
           </Button>
+          {detail.error && (
+            <Button variant="ghost" onClick={detail.refresh}>
+              Retry loading job
+            </Button>
+          )}
           {job ? (
             <>
               <p className="mt-2 text-xs text-muted-foreground">Jobs / Details</p>
@@ -148,7 +180,11 @@ export function ThreadJobDetails(props: Target & { itemId: TurnItemId; onClose: 
               <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border bg-muted/40 p-2 text-xs">
                 $ {job.command}
                 {"\n\n"}
-                {job.output || "(no output yet)"}
+                {detail.isPending
+                  ? "Loading output…"
+                  : detail.error
+                    ? "Could not load output."
+                    : fetchedJob?.output || "(no output yet)"}
               </pre>
               {error && (
                 <p role="alert" className="mt-3 text-sm text-destructive">
@@ -192,7 +228,13 @@ export function ThreadJobDetails(props: Target & { itemId: TurnItemId; onClose: 
               </AlertDialog>
             </>
           ) : (
-            <p className="mt-6">This job is no longer available.</p>
+            <p className="mt-6">
+              {detail.isPending
+                ? "Loading job…"
+                : detail.error
+                  ? "Could not load job."
+                  : "This job is no longer available."}
+            </p>
           )}
         </div>
       </div>

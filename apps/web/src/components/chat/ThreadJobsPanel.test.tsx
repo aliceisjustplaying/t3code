@@ -12,7 +12,39 @@ import * as DateTime from "effect/DateTime";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
-const state = vi.hoisted(() => ({ items: [] as OrchestrationV2TurnItem[] }));
+const state = vi.hoisted(() => ({
+  items: [] as OrchestrationV2TurnItem[],
+  first: {
+    items: [] as OrchestrationV2TurnItem[],
+    nextCursor: null as { ordinal: number; itemId: TurnItemId } | null,
+  },
+  older: { items: [] as OrchestrationV2TurnItem[], nextCursor: null },
+  calls: [] as { environmentId: EnvironmentId; input: { threadId: ThreadId; cursor?: unknown } }[],
+}));
+vi.mock("../../state/orchestration", () => ({
+  orchestrationEnvironment: {
+    jobsPage: (target: {
+      environmentId: EnvironmentId;
+      input: { threadId: ThreadId; cursor?: unknown };
+    }) => {
+      state.calls.push(target);
+      return target.input.cursor == null ? state.first : state.older;
+    },
+  },
+}));
+vi.mock("../../state/query", () => ({
+  useEnvironmentQuery: (data: unknown) => ({
+    data,
+    error: null,
+    isPending: false,
+    refresh: () => {},
+  }),
+}));
+vi.mock("../../state/queries", () => ({
+  useTurnItemDetail: () => {
+    throw new Error("Job output must not load while only the list is open");
+  },
+}));
 vi.mock("../../state/entities", () => ({
   useThreadProjection: () => ({ projection: { turnItems: state.items } }),
 }));
@@ -63,16 +95,21 @@ afterEach(async () => {
   container?.remove();
   vi.unstubAllGlobals();
 });
-it("shows newest jobs regardless of outcome, with older jobs expandable in the same order", async () => {
+it("loads older persisted summaries on demand and keeps their destination environment", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  state.items = [
-    item(1, "failed"),
-    item(5, "succeeded"),
-    item(3, "timed_out"),
-    item(6, "succeeded"),
-    item(2, "stopped"),
-    item(4, "succeeded"),
-  ];
+  state.items = [];
+  state.calls = [];
+  state.first = {
+    items: [
+      item(5, "succeeded"),
+      item(3, "timed_out"),
+      item(6, "succeeded"),
+      item(2, "stopped"),
+      item(4, "succeeded"),
+    ],
+    nextCursor: { ordinal: 2, itemId: TurnItemId.make("job-2") },
+  };
+  state.older = { items: [item(1, "failed")], nextCursor: null };
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -94,8 +131,19 @@ it("shows newest jobs regardless of outcome, with older jobs expandable in the s
     [...container!.querySelectorAll<HTMLButtonElement>("button")].find((button) =>
       button.hasAttribute("aria-expanded"),
     )!;
-  await act(async () => toggle().click());
+  const load = [...container!.querySelectorAll<HTMLButtonElement>("button")].find(
+    (button) => button.textContent === "Load older jobs",
+  )!;
+  await act(async () => load.click());
   expect(names()).toEqual(["Job 6", "Job 5", "Job 4", "Job 3", "Job 2", "Job 1"]);
+  expect(state.calls.some((call) => call.input.cursor === state.first.nextCursor)).toBe(true);
+  expect(
+    state.calls.every(
+      (call) =>
+        call.environmentId === EnvironmentId.make("environment") &&
+        call.input.threadId === threadId,
+    ),
+  ).toBe(true);
   await act(async () => toggle().click());
   expect(names()).toEqual(["Job 6", "Job 5", "Job 4", "Job 3", "Job 2"]);
 });

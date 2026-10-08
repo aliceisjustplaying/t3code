@@ -10,6 +10,8 @@ const state = vi.hoisted(() => ({
   pending: false,
   connected: true,
   acknowledged: false,
+  revision: 0,
+  listeners: new Set<() => void>(),
   read: vi.fn(async () => ({ _tag: "Success" })),
   resolve: vi.fn(async (_input: unknown) => ({ _tag: "Success" })),
   refresh: vi.fn(),
@@ -34,29 +36,40 @@ vi.mock("../../state/headsUpInbox", () => ({
 vi.mock("../../state/use-atom-command", () => ({
   useAtomCommand: (command: "read" | "resolve") => state[command],
 }));
-vi.mock("../../state/query", () => ({
-  useEnvironmentQuery: (query: string) => ({
-    data:
-      query === "page"
-        ? {
-            items: [
-              {
-                ...entry,
-                readAt: state.acknowledged ? entry.createdAt : null,
-                note: {
-                  ...entry.note,
-                  ...(state.view === "reviewed" ? { resolution: "dismiss" } : {}),
-                },
-              },
-            ],
-            nextCursor: null,
-          }
-        : { unreadCount: state.acknowledged ? 0 : 1, unresolvedCount: 1, reviewedCount: 1 },
-    isPending: query === "page" && state.pending,
-    error: null,
-    refresh: state.refresh,
-  }),
-}));
+vi.mock("../../state/query", async () => {
+  const { useSyncExternalStore } = await import("react");
+  const subscribe = (listener: () => void) => {
+    state.listeners.add(listener);
+    return () => state.listeners.delete(listener);
+  };
+  return {
+    useEnvironmentQuery: (query: string) => {
+      // Query updates must reach memoized children, just like real atom subscriptions.
+      useSyncExternalStore(subscribe, () => state.revision);
+      return {
+        data:
+          query === "page"
+            ? {
+                items: [
+                  {
+                    ...entry,
+                    readAt: state.acknowledged ? entry.createdAt : null,
+                    note: {
+                      ...entry.note,
+                      ...(state.view === "reviewed" ? { resolution: "dismiss" } : {}),
+                    },
+                  },
+                ],
+                nextCursor: null,
+              }
+            : { unreadCount: state.acknowledged ? 0 : 1, unresolvedCount: 1, reviewedCount: 1 },
+        isPending: query === "page" && state.pending,
+        error: null,
+        refresh: state.refresh,
+      };
+    },
+  };
+});
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => state.navigate }));
 vi.mock("../ChatMarkdown", () => ({ default: ({ text }: { text: string }) => <p>{text}</p> }));
 import { HeadsUpInbox } from "./HeadsUpInbox";
@@ -64,6 +77,7 @@ import { useComposerDraftStore } from "../../composerDraftStore";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 
 const environmentId = EnvironmentId.make("environment");
+const otherEnvironmentId = EnvironmentId.make("other-environment");
 const threadId = ThreadId.make("source");
 const entry: HeadsUpInboxEntry = {
   id: "notice",
@@ -86,16 +100,18 @@ const entry: HeadsUpInboxEntry = {
 };
 let root: Root;
 let container: HTMLElement;
-const render = async () => {
-  await act(async () =>
+const render = async (environment = environmentId, currentThreadId = threadId) => {
+  await act(async () => {
+    state.revision++;
+    for (const listener of state.listeners) listener();
     root.render(
       <HeadsUpInbox
-        environmentId={environmentId}
-        threadId={threadId}
+        environmentId={environment}
+        threadId={currentThreadId}
         onDraftReady={state.draftReady}
       />,
-    ),
-  );
+    );
+  });
 };
 const button = (text: string) => {
   const found = [...document.querySelectorAll<HTMLButtonElement>("button")].find(
@@ -104,8 +120,8 @@ const button = (text: string) => {
   if (!found) throw new Error(`Missing button: ${text}`);
   return found;
 };
-async function openInbox() {
-  await render();
+async function openInbox(environment = environmentId, currentThreadId = threadId) {
+  await render(environment, currentThreadId);
   await act(async () =>
     document.querySelector<HTMLButtonElement>('button[aria-label^="You should know"]')!.click(),
   );
@@ -121,6 +137,9 @@ beforeEach(() => {
   state.navigate.mockClear();
   state.draftReady.mockReset();
   useComposerDraftStore.getState().clearComposerContent(scopeThreadRef(environmentId, threadId));
+  useComposerDraftStore
+    .getState()
+    .clearComposerContent(scopeThreadRef(otherEnvironmentId, threadId));
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -182,10 +201,13 @@ it("read-triggered refreshes do not insert a banner ahead of mounted rows in eit
   await openInbox();
   const row = document.querySelector('button[aria-controls="ysk-notice"]')!;
   const section = row.closest("section")!;
+  expect(row.textContent).toContain("Unread");
   const contentBefore = section.parentElement!.textContent;
   state.pending = true;
   await render();
+  expect(section.parentElement!.getAttribute("aria-busy")).toBe("true");
   expect(section.parentElement!.textContent).toBe(contentBefore);
+  expect(section.parentElement!.firstElementChild).toBe(section);
   expect(document.querySelector('button[aria-controls="ysk-notice"]')).toBe(row);
   state.pending = false;
   await act(async () => button("reviewed (1)").click());
@@ -193,7 +215,10 @@ it("read-triggered refreshes do not insert a banner ahead of mounted rows in eit
   const reviewedContent = reviewed.closest("section")!.parentElement!.textContent;
   state.pending = true;
   await render();
-  expect(reviewed.closest("section")!.parentElement!.textContent).toBe(reviewedContent);
+  const reviewedSection = reviewed.closest("section")!;
+  expect(reviewedSection.parentElement!.getAttribute("aria-busy")).toBe("true");
+  expect(reviewedSection.parentElement!.textContent).toBe(reviewedContent);
+  expect(reviewedSection.parentElement!.firstElementChild).toBe(reviewedSection);
   expect(document.querySelector('button[aria-controls="ysk-notice"]')).toBe(reviewed);
   state.pending = false;
   state.acknowledged = true;
@@ -243,6 +268,96 @@ it.each(["unresolved", "reviewed"] as const)(
       input: { threadId, turnItemId: entry.turnItemId, resolution: "dismiss" },
     });
     expect(state.navigate).not.toHaveBeenCalled();
+  },
+);
+
+it.each(["Success", "Failure"] as const)(
+  "Ask completing with %s after closing writes only the captured draft on success and leaves the reopened inbox alone",
+  async (resultTag) => {
+    const target = scopeThreadRef(environmentId, threadId);
+    const otherTarget = scopeThreadRef(otherEnvironmentId, threadId);
+    const store = useComposerDraftStore.getState();
+    store.setPrompt(target, "Existing draft");
+    store.setPrompt(otherTarget, "Other environment draft");
+    await openInbox(environmentId, ThreadId.make("current"));
+    let finishSave!: (result: { _tag: string }) => void;
+    const saving = new Promise<{ _tag: string }>((resolve) => {
+      finishSave = resolve;
+    });
+    state.resolve.mockReturnValueOnce(saving);
+    await act(async () => button("Ask agent · Draft").click());
+    expect(state.resolve).toHaveBeenCalledWith({
+      environmentId,
+      input: { threadId, turnItemId: entry.turnItemId, resolution: "dismiss" },
+    });
+    await act(async () =>
+      document.querySelector<HTMLButtonElement>('button[aria-label="Back to chat"]')!.click(),
+    );
+    await openInbox(otherEnvironmentId);
+    store.setPrompt(target, "Edited while saving");
+    await act(async () => finishSave({ _tag: resultTag }));
+    const prompt = useComposerDraftStore.getState().getComposerDraft(target)?.prompt;
+    if (resultTag === "Success") {
+      expect(prompt).toContain("Edited while saving\n\nHere is a note offered by a side agent:");
+      expect(prompt).toContain("Check the cache.");
+      expect(prompt?.match(/Here is a note/g)).toHaveLength(1);
+    } else {
+      expect(prompt).toBe("Edited while saving");
+    }
+    expect(useComposerDraftStore.getState().getComposerDraft(otherTarget)?.prompt).toBe(
+      "Other environment draft",
+    );
+    expect(state.draftReady).not.toHaveBeenCalled();
+    expect(state.navigate).not.toHaveBeenCalled();
+    expect(button("Ask agent · Draft").disabled).toBe(false);
+    expect(document.body.textContent).not.toContain("The notice could not be updated.");
+  },
+);
+
+it.each(["Success", "Failure"] as const)(
+  "Ask completing with %s after same-environment thread navigation preserves the new screen",
+  async (resultTag) => {
+    const target = scopeThreadRef(environmentId, entry.targetThreadId);
+    const currentThread = ThreadId.make("current-b");
+    const currentTarget = scopeThreadRef(environmentId, currentThread);
+    const store = useComposerDraftStore.getState();
+    store.setPrompt(target, "Captured target draft");
+    store.setPrompt(currentTarget, "Current screen draft");
+    let selectedJob: string | null = "current-screen-job";
+    state.draftReady.mockImplementation(() => {
+      selectedJob = null;
+    });
+    await openInbox(environmentId, ThreadId.make("current-a"));
+    let finishSave!: (result: { _tag: string }) => void;
+    const saving = new Promise<{ _tag: string }>((resolve) => {
+      finishSave = resolve;
+    });
+    state.resolve.mockReturnValueOnce(saving);
+    await act(async () => button("Ask agent · Draft").click());
+    expect(state.resolve).toHaveBeenCalledWith({
+      environmentId,
+      input: { threadId: entry.threadId, turnItemId: entry.turnItemId, resolution: "dismiss" },
+    });
+    // Retain the open outer inbox; only the current-thread prop changes.
+    await render(environmentId, currentThread);
+    store.setPrompt(target, "Edited captured target draft");
+    await act(async () => finishSave({ _tag: resultTag }));
+    const prompt = useComposerDraftStore.getState().getComposerDraft(target)?.prompt;
+    if (resultTag === "Success") {
+      expect(prompt).toContain("Edited captured target draft\n\nHere is a note");
+      expect(prompt?.match(/Here is a note/g)).toHaveLength(1);
+    } else {
+      expect(prompt).toBe("Edited captured target draft");
+    }
+    expect(useComposerDraftStore.getState().getComposerDraft(currentTarget)?.prompt).toBe(
+      "Current screen draft",
+    );
+    expect(selectedJob).toBe("current-screen-job");
+    expect(state.draftReady).not.toHaveBeenCalled();
+    expect(state.navigate).not.toHaveBeenCalled();
+    expect(button("Ask agent · Draft").disabled).toBe(false);
+    expect(document.body.textContent).not.toContain("The notice could not be updated.");
+    store.clearComposerContent(currentTarget);
   },
 );
 

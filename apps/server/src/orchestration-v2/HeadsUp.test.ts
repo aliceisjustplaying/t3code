@@ -3,6 +3,10 @@ import {
   CommandId,
   EventId,
   ProjectId,
+  NodeId,
+  MessageId,
+  RunId,
+  RunAttemptId,
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderThreadId,
@@ -19,6 +23,9 @@ import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
+import * as Option from "effect/Option";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as EventSink from "./EventSink.ts";
 import * as EffectWorker from "./EffectWorker.ts";
 import {
@@ -232,6 +239,20 @@ it.effect("resolving a heads-up persists, survives a small window, and can be un
     // A forwarded note is answered in the parent's UI but its extension lives
     // in the child's provider session, including when Undo restores the note.
     const sourceThreadId = ThreadId.make("thread:heads-up-child");
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("create-heads-up-child"),
+      threadId: sourceThreadId,
+      projectId: ProjectId.make("project:heads-up"),
+      title: "Source child",
+      modelSelection: { instanceId, model: "gpt-5.1-codex" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
     const sourceItem = (yield* projections.getThreadProjection(threadId)).turnItems.find(
       (candidate) => candidate.id === itemId,
     );
@@ -260,6 +281,23 @@ it.effect("resolving a heads-up persists, survives a small window, and can be un
         noteId: "n-1",
         resolution,
       });
+    }
+    yield* orchestrator.dispatch({
+      type: "thread.delete",
+      commandId: CommandId.make("delete-heads-up-child"),
+      threadId: sourceThreadId,
+    });
+    for (const resolution of ["dismiss", null] as const) {
+      const commandId = CommandId.make(`answer-orphan-${resolution}`);
+      yield* orchestrator.dispatch({
+        type: "thread.heads-up.resolve",
+        commandId,
+        threadId,
+        turnItemId: itemId,
+        resolution,
+      });
+      assert.equal((yield* headsUpOf)?.resolution, resolution ?? undefined);
+      assert.deepEqual(yield* outbox.listByCommandId(commandId), []);
     }
   }).pipe(Effect.provide(orchestratorLayer)),
 );
@@ -429,130 +467,232 @@ it.live("synchronizes every forwarded thread live and on replay with one source 
   ).pipe(Effect.provide(orchestratorLayer)),
 );
 
+const makeFeedbackFixture = Effect.fnUntraced(function* (
+  name: string,
+  options: {
+    readonly failFirstLoad?: boolean;
+    readonly failLoads?: ReadonlyArray<number>;
+    readonly answerGate?: {
+      readonly entered: Deferred.Deferred<void>;
+      readonly release: Deferred.Deferred<void>;
+    };
+  } = {},
+) {
+  let registrations = 0;
+  let opens = 0;
+  let active = false;
+  const delivered: Array<string | null> = [];
+  const pi = ProviderDriverKind.make("pi");
+  const piInstance = ProviderInstanceId.make("pi");
+  const threadId = ThreadId.make(name);
+  const sessionId = ProviderSessionId.make(`${name}-session`);
+  const itemId = TurnItemId.make(`${name}-notice`);
+  const now = yield* DateTime.now;
+  const providerThread = {
+    id: ProviderThreadId.make(`${name}-native`),
+    driver: pi,
+    providerInstanceId: piInstance,
+    providerSessionId: sessionId,
+    appThreadId: threadId,
+    ownerNodeId: null,
+    nativeThreadRef: {
+      driver: pi,
+      nativeId: "/tmp/heads-up-session.jsonl",
+      strength: "strong" as const,
+    },
+    nativeConversationHeadRef: null,
+    status: "idle" as const,
+    firstRunOrdinal: null,
+    lastRunOrdinal: null,
+    handoffIds: [],
+    forkedFrom: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+  const piAdapter: ProviderAdapterV2Shape = {
+    ...adapter,
+    instanceId: piInstance,
+    driver: pi,
+    openSession: () =>
+      Effect.sync(() => {
+        opens++;
+        let loaded = false;
+        const register = Effect.gen(function* () {
+          registrations++;
+          if (active) return yield* Effect.fail("registerThread rejected during active Pi turn");
+          // Pi clears its app binding before a native switch that can fail.
+          loaded = false;
+          if (
+            (options.failFirstLoad && registrations === 1) ||
+            options.failLoads?.includes(registrations)
+          )
+            return yield* Effect.fail("switch_session cancelled");
+          loaded = true;
+          return providerThread;
+        });
+        return {
+          instanceId: piInstance,
+          driver: pi,
+          providerSessionId: sessionId,
+          providerSession: {
+            id: sessionId,
+            driver: pi,
+            providerInstanceId: piInstance,
+            status: "ready" as const,
+            cwd: "/tmp",
+            model: "default",
+            capabilities: {
+              ...CodexProviderCapabilitiesV2,
+              sessions: {
+                ...CodexProviderCapabilitiesV2.sessions,
+                supportsMultipleProviderThreadsPerSession: false,
+              },
+            },
+            createdAt: now,
+            updatedAt: now,
+            lastError: null,
+          },
+          events: Stream.never,
+          ensureThread: () =>
+            register.pipe(
+              Effect.mapError(
+                (cause) => new ProviderAdapterEnsureThreadError({ driver: pi, threadId, cause }),
+              ),
+            ),
+          resumeThread: () =>
+            register.pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapterResumeThreadError({
+                    driver: pi,
+                    providerSessionId: sessionId,
+                    providerThreadId: providerThread.id,
+                    cause,
+                  }),
+              ),
+            ),
+          answerHeadsUp: ({ resolution }) =>
+            Effect.gen(function* () {
+              if (options.answerGate) {
+                yield* Deferred.succeed(options.answerGate.entered, undefined);
+                yield* Deferred.await(options.answerGate.release);
+              }
+              assert.isTrue(loaded, "Feedback must not reach an unsuccessfully loaded runtime");
+              delivered.push(resolution);
+            }),
+          startTurn: () =>
+            Effect.sync(() => {
+              active = true;
+            }),
+          steerTurn: () => Effect.die("unused"),
+          interruptTurn: () =>
+            Effect.sync(() => {
+              active = false;
+            }),
+          respondToRuntimeRequest: () => Effect.die("unused"),
+          readThreadSnapshot: () => Effect.die("unused"),
+          rollbackThread: () => Effect.die("unused"),
+          forkThread: () => Effect.die("unused"),
+        };
+      }),
+  };
+  const layer = Layer.mergeAll(
+    database,
+    ProjectionStore.layer.pipe(Layer.provide(database)),
+    EffectOutbox.layer.pipe(Layer.provide(database)),
+    ProviderReplayHarness.layerWithRegistry(
+      { name },
+      ProviderAdapterRegistry.layerFromAdapters([piAdapter]),
+      { databaseLayer: database, runEffectWorker: false },
+    ),
+  );
+  const seed = Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const sink = yield* EventSink.EventSinkV2;
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make(`create-${name}`),
+      threadId,
+      projectId: ProjectId.make(`${name}-project`),
+      title: "Feedback",
+      modelSelection: { instanceId: piInstance, model: "default" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make(`${name}-provider-thread`),
+          type: "provider-thread.updated",
+          threadId,
+          occurredAt: now,
+          payload: providerThread,
+        },
+        {
+          id: EventId.make(`${name}-notice`),
+          type: "turn-item.updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: itemId,
+            threadId,
+            runId: null,
+            nodeId: null,
+            providerThreadId: providerThread.id,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 1,
+            status: "completed",
+            title: "Feedback note",
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+            type: "system_notice",
+            message: "[ysk:n1] Heads up · Feedback note",
+            headsUp: { noteId: "n1", tag: "Heads up", line: "Feedback note" },
+          },
+        },
+      ],
+    });
+  });
+  const feedback = (id: string, resolution: "dismiss" | null = "dismiss") => ({
+    id,
+    commandId: CommandId.make(id),
+    threadId,
+    request: {
+      type: "provider-heads-up.answer" as const,
+      providerThreadId: providerThread.id,
+      noteId: "n1",
+      resolution,
+    },
+  });
+  return {
+    layer,
+    seed,
+    feedback,
+    threadId,
+    sessionId,
+    itemId,
+    providerThread,
+    delivered,
+    counts: () => ({ opens, registrations }),
+  };
+});
+
 it.effect("retries failed heads-up session restoration before settling feedback", () =>
   Effect.gen(function* () {
-    let registrations = 0;
-    let opens = 0;
-    const delivered: Array<string | null> = [];
-    const pi = ProviderDriverKind.make("pi");
-    const piInstance = ProviderInstanceId.make("pi");
-    const threadId = ThreadId.make("restore-heads-up");
-    const sessionId = ProviderSessionId.make("restore-heads-up-session");
-    const now = yield* DateTime.now;
-    const providerThread = {
-      id: ProviderThreadId.make("restore-heads-up-native"),
-      driver: pi,
-      providerInstanceId: piInstance,
-      providerSessionId: sessionId,
-      appThreadId: threadId,
-      ownerNodeId: null,
-      nativeThreadRef: {
-        driver: pi,
-        nativeId: "/tmp/heads-up-session.jsonl",
-        strength: "strong" as const,
-      },
-      nativeConversationHeadRef: null,
-      status: "idle" as const,
-      firstRunOrdinal: null,
-      lastRunOrdinal: null,
-      handoffIds: [],
-      forkedFrom: null,
-      createdAt: now,
-      updatedAt: now,
-    };
-    const piAdapter: ProviderAdapterV2Shape = {
-      ...adapter,
-      instanceId: piInstance,
-      driver: pi,
-      openSession: () =>
-        Effect.sync(() => {
-          opens++;
-          let loaded = false;
-          const register = Effect.gen(function* () {
-            registrations++;
-            if (registrations === 1) return yield* Effect.fail("switch_session cancelled");
-            loaded = true;
-            return providerThread;
-          });
-          return {
-            instanceId: piInstance,
-            driver: pi,
-            providerSessionId: sessionId,
-            providerSession: {
-              id: sessionId,
-              driver: pi,
-              providerInstanceId: piInstance,
-              status: "ready" as const,
-              cwd: "/tmp",
-              model: "default",
-              capabilities: CodexProviderCapabilitiesV2,
-              createdAt: now,
-              updatedAt: now,
-              lastError: null,
-            },
-            events: Stream.never,
-            ensureThread: () =>
-              register.pipe(
-                Effect.mapError(
-                  (cause) => new ProviderAdapterEnsureThreadError({ driver: pi, threadId, cause }),
-                ),
-              ),
-            resumeThread: () =>
-              register.pipe(
-                Effect.mapError(
-                  (cause) =>
-                    new ProviderAdapterResumeThreadError({
-                      driver: pi,
-                      providerSessionId: sessionId,
-                      providerThreadId: providerThread.id,
-                      cause,
-                    }),
-                ),
-              ),
-            answerHeadsUp: ({ resolution }) =>
-              Effect.sync(() => {
-                if (loaded) delivered.push(resolution);
-              }),
-            startTurn: () => Effect.die("No model turn for feedback"),
-            steerTurn: () => Effect.die("unused"),
-            interruptTurn: () => Effect.void,
-            respondToRuntimeRequest: () => Effect.die("unused"),
-            readThreadSnapshot: () => Effect.die("unused"),
-            rollbackThread: () => Effect.die("unused"),
-            forkThread: () => Effect.die("unused"),
-          };
-        }),
-    };
+    const fixture = yield* makeFeedbackFixture("restore-heads-up", { failFirstLoad: true });
+    const { threadId, providerThread, delivered } = fixture;
     yield* Effect.gen(function* () {
-      const orchestrator = yield* Orchestrator.OrchestratorV2;
       const sink = yield* EventSink.EventSinkV2;
       const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
       const outbox = yield* EffectOutbox.EffectOutboxV2;
-      yield* orchestrator.dispatch({
-        type: "thread.create",
-        commandId: CommandId.make("create-restore-heads-up"),
-        threadId,
-        projectId: ProjectId.make("restore-heads-up-project"),
-        title: "Restore feedback",
-        modelSelection: { instanceId: piInstance, model: "default" },
-        runtimeMode: "full-access",
-        interactionMode: "default",
-        branch: null,
-        worktreePath: null,
-        createdBy: "user",
-        creationSource: "web",
-      });
-      yield* sink.write({
-        events: [
-          {
-            id: EventId.make("restore-provider-thread"),
-            type: "provider-thread.updated",
-            threadId,
-            occurredAt: now,
-            payload: providerThread,
-          },
-        ],
-      });
+      yield* fixture.seed;
       const commandId = CommandId.make("restore-feedback");
       yield* sink.writeWithEffects({
         events: [],
@@ -577,8 +717,7 @@ it.effect("retries failed heads-up session restoration before settling feedback"
       assert.equal(yield* worker.drain(), 1);
       assert.deepEqual(delivered, ["dismiss"]);
       assert.equal((yield* outbox.listByCommandId(commandId))[0]?.status, "succeeded");
-      assert.equal(opens, 1);
-      assert.equal(registrations, 2);
+      assert.deepEqual(fixture.counts(), { opens: 1, registrations: 2 });
       // A loaded session answers again without switching away from its live thread.
       yield* sink.writeWithEffects({
         events: [],
@@ -598,18 +737,296 @@ it.effect("retries failed heads-up session restoration before settling feedback"
       });
       yield* worker.drain();
       assert.deepEqual(delivered, ["dismiss", null]);
-      assert.equal(registrations, 2);
-    }).pipe(
-      Effect.provide(
-        Layer.mergeAll(
-          EffectOutbox.layer.pipe(Layer.provide(database)),
-          ProviderReplayHarness.layerWithRegistry(
-            { name: "heads-up-restore" },
-            ProviderAdapterRegistry.layerFromAdapters([piAdapter]),
-            { databaseLayer: database, runEffectWorker: false },
-          ),
+      assert.deepEqual(fixture.counts(), { opens: 1, registrations: 2 });
+    }).pipe(Effect.provide(fixture.layer));
+  }).pipe(Effect.scoped),
+);
+
+it.effect.each([false, true])(
+  "restores feedback after a successful load then failed resume and ensure (cross-thread: %s)",
+  (crossThread) =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFeedbackFixture(`failed-reload-feedback-${crossThread}`, {
+        failLoads: [2, 3],
+      });
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const sink = yield* EventSink.EventSinkV2;
+        yield* fixture.seed;
+        const { thread } = yield* projections.getThreadRecords(fixture.threadId, []);
+        const modelSelection = {
+          ...thread.modelSelection,
+          options: [{ id: "thinking", value: "low" }],
+        };
+        const runtimePolicy = {
+          cwd: thread.worktreePath,
+          runtimeMode: thread.runtimeMode,
+          interactionMode: thread.interactionMode,
+        };
+        const runtime = yield* sessions.open({
+          threadId: fixture.threadId,
+          providerSessionId: fixture.sessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        yield* runtime.resumeThread({
+          threadId: fixture.threadId,
+          providerThread: fixture.providerThread,
+          modelSelection,
+          runtimePolicy,
+        });
+        const targetThreadId = crossThread
+          ? ThreadId.make(`${fixture.threadId}-replacement`)
+          : fixture.threadId;
+        if (crossThread) {
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make(`${targetThreadId}-create`),
+            threadId: targetThreadId,
+            projectId: thread.projectId,
+            title: "Replacement",
+            modelSelection,
+            runtimeMode: thread.runtimeMode,
+            interactionMode: thread.interactionMode,
+            branch: null,
+            worktreePath: null,
+            createdBy: "user",
+            creationSource: "web",
+          });
+        }
+        const nextSelection = { ...modelSelection, options: [{ id: "thinking", value: "high" }] };
+        const targetProviderThread = crossThread
+          ? {
+              ...fixture.providerThread,
+              appThreadId: targetThreadId,
+              nativeThreadRef: {
+                ...fixture.providerThread.nativeThreadRef,
+                nativeId: "/tmp/other.jsonl",
+              },
+            }
+          : fixture.providerThread;
+        assert.equal(
+          (yield* Effect.exit(
+            runtime.resumeThread({
+              threadId: targetThreadId,
+              providerThread: targetProviderThread,
+              modelSelection: nextSelection,
+              runtimePolicy,
+            }),
+          ))._tag,
+          "Failure",
+        );
+        assert.equal(
+          (yield* Effect.exit(
+            runtime.ensureThread({
+              threadId: targetThreadId,
+              existingProviderThread: targetProviderThread,
+              modelSelection: nextSelection,
+              runtimePolicy,
+            }),
+          ))._tag,
+          "Failure",
+        );
+        const feedback = fixture.feedback(`failed-reload-answer-${crossThread}`);
+        yield* sink.writeWithEffects({ events: [], effects: [feedback] });
+        yield* worker.drain();
+        assert.deepEqual(fixture.delivered, ["dismiss"]);
+        assert.deepEqual(fixture.counts(), { opens: 1, registrations: 4 });
+        assert.equal((yield* outbox.listByCommandId(feedback.commandId))[0]?.status, "succeeded");
+      }).pipe(Effect.provide(fixture.layer));
+    }).pipe(Effect.scoped),
+);
+
+it.effect(
+  "delivers reviewed feedback during an active Pi turn after next-turn thinking changes",
+  () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFeedbackFixture("active-feedback");
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        yield* fixture.seed;
+        const { thread } = yield* projections.getThreadRecords(fixture.threadId, []);
+        const modelSelection = {
+          ...thread.modelSelection,
+          options: [{ id: "thinking", value: "low" }],
+        };
+        const runtimePolicy = {
+          cwd: thread.worktreePath,
+          runtimeMode: thread.runtimeMode,
+          interactionMode: thread.interactionMode,
+        };
+        const runtime = yield* sessions.open({
+          threadId: fixture.threadId,
+          providerSessionId: fixture.sessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        yield* runtime.resumeThread({
+          threadId: fixture.threadId,
+          providerThread: fixture.providerThread,
+          modelSelection,
+          runtimePolicy,
+        });
+        yield* runtime.startTurn({
+          appThread: thread,
+          threadId: fixture.threadId,
+          runId: RunId.make("active-feedback-run"),
+          runOrdinal: 1,
+          providerTurnOrdinal: 1,
+          attemptId: RunAttemptId.make("active-feedback-attempt"),
+          rootNodeId: NodeId.make("active-feedback-node"),
+          providerThread: fixture.providerThread,
+          message: {
+            messageId: MessageId.make("active-feedback-message"),
+            text: "Continue",
+            attachments: [],
+            createdBy: "user",
+            creationSource: "web",
+          },
+          modelSelection,
+          runtimePolicy,
+        });
+        const nextSelection = { ...modelSelection, options: [{ id: "thinking", value: "high" }] };
+        yield* orchestrator.dispatch({
+          type: "thread.model-selection.set",
+          commandId: CommandId.make("active-feedback-configure"),
+          threadId: fixture.threadId,
+          modelSelection: nextSelection,
+        });
+        const commandId = CommandId.make("active-feedback-reviewed");
+        yield* orchestrator.dispatch({
+          type: "thread.heads-up.resolve",
+          commandId,
+          threadId: fixture.threadId,
+          turnItemId: fixture.itemId,
+          resolution: "dismiss",
+        });
+        yield* worker.drain();
+        assert.deepEqual(fixture.delivered, ["dismiss"]);
+        assert.deepEqual(fixture.counts(), { opens: 1, registrations: 1 });
+        assert.equal((yield* outbox.listByCommandId(commandId))[0]?.status, "succeeded");
+        assert.deepEqual(
+          (yield* projections.getThreadRecords(fixture.threadId, [])).thread.modelSelection,
+          nextSelection,
+        );
+        // Ordinary turn preparation remains config-sensitive and cannot reload
+        // this adapter while its previous turn is active.
+        assert.equal(
+          (yield* Effect.exit(
+            runtime.resumeThread({
+              threadId: fixture.threadId,
+              providerThread: fixture.providerThread,
+              modelSelection: nextSelection,
+              runtimePolicy,
+            }),
+          ))._tag,
+          "Failure",
+        );
+      }).pipe(Effect.provide(fixture.layer));
+    }).pipe(Effect.scoped),
+);
+
+it.effect(
+  "restores feedback from bounded metadata even when unrelated transcript rows cannot decode",
+  () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFeedbackFixture("metadata-feedback");
+      yield* Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const sql = yield* SqlClient.SqlClient;
+        yield* fixture.seed;
+        const now = DateTime.formatIso(yield* DateTime.now);
+        yield* sql`INSERT INTO orchestration_v2_projection_messages
+        (message_id, thread_id, run_id, node_id, role, streaming, created_at, updated_at, payload_json)
+        VALUES ('obsolete-feedback-history', ${fixture.threadId}, NULL, NULL, 'assistant', 0, ${now}, ${now}, '{"obsolete":true}')`;
+        assert.equal(
+          (yield* Effect.exit(projections.getThreadProjection(fixture.threadId)))._tag,
+          "Failure",
+        );
+        const feedback = fixture.feedback("metadata-feedback-answer");
+        yield* sink.writeWithEffects({ events: [], effects: [feedback] });
+        yield* worker.drain();
+        assert.deepEqual(fixture.delivered, ["dismiss"]);
+        assert.equal((yield* outbox.listByCommandId(feedback.commandId))[0]?.status, "succeeded");
+      }).pipe(Effect.provide(fixture.layer));
+    }).pipe(Effect.scoped),
+);
+
+it.effect("does not reopen a deleted feedback source when a stale effect executes", () =>
+  Effect.gen(function* () {
+    const fixture = yield* makeFeedbackFixture("deleted-feedback");
+    yield* Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      yield* fixture.seed;
+      yield* orchestrator.dispatch({
+        type: "thread.delete",
+        commandId: CommandId.make("delete-feedback-source"),
+        threadId: fixture.threadId,
+      });
+      yield* worker.drain();
+      // Bypass enqueue-time liveness deliberately: durable effects can already
+      // exist when execution starts, so the executor must check too.
+      const feedback = fixture.feedback("stale-feedback-answer");
+      yield* sink.writeWithEffects({ events: [], effects: [feedback] });
+      yield* worker.drain();
+      assert.deepEqual(fixture.delivered, []);
+      assert.deepEqual(fixture.counts(), { opens: 0, registrations: 0 });
+      assert.equal((yield* outbox.listByCommandId(feedback.commandId))[0]?.status, "succeeded");
+    }).pipe(Effect.provide(fixture.layer));
+  }).pipe(Effect.scoped),
+);
+
+it.effect("deletion cancels running and queued feedback before either can finish delivery", () =>
+  Effect.gen(function* () {
+    const entered = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    const fixture = yield* makeFeedbackFixture("feedback-deletion-race", {
+      answerGate: { entered, release },
+    });
+    yield* Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      yield* fixture.seed;
+      const running = fixture.feedback("running-feedback-answer");
+      const queued = fixture.feedback("queued-feedback-answer", null);
+      yield* sink.writeWithEffects({ events: [], effects: [running, queued] });
+      const execution = yield* worker.runOnce.pipe(Effect.forkScoped);
+      yield* Deferred.await(entered);
+      assert.equal((yield* outbox.listByCommandId(running.commandId))[0]?.status, "running");
+      yield* orchestrator.dispatch({
+        type: "thread.delete",
+        commandId: CommandId.make("delete-running-feedback-source"),
+        threadId: fixture.threadId,
+      });
+      // Join before releasing the adapter: only committed cancellation can
+      // unblock this worker, not an accidentally fast provider answer.
+      yield* Fiber.join(execution);
+      yield* Deferred.succeed(release, undefined);
+      yield* worker.drain();
+      assert.deepEqual(fixture.delivered, []);
+      for (const feedback of [running, queued])
+        assert.equal((yield* outbox.listByCommandId(feedback.commandId))[0]?.status, "cancelled");
+      assert.isTrue(
+        Option.isNone(
+          yield* (yield* ProviderSessionManager.ProviderSessionManagerV2).get(fixture.sessionId),
         ),
-      ),
-    );
+      );
+    }).pipe(Effect.provide(fixture.layer));
   }).pipe(Effect.scoped),
 );

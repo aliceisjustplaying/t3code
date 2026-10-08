@@ -2112,6 +2112,10 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         yield* Queue.unbounded<Extract<ProviderAdapterV2Event, { type: "turn.terminal" }>>();
       const systemNoticeReceipts =
         yield* Queue.unbounded<Extract<ProviderAdapterV2Event, { type: "turn_item.updated" }>>();
+      const providerThreadReceipts =
+        yield* Queue.unbounded<
+          Extract<ProviderAdapterV2Event, { type: "provider_thread.updated" }>
+        >();
       let openedOptions: ClaudeAdapterV2.ClaudeAgentSdkQueryOptions | undefined;
       const adapter = ClaudeAdapterV2.makeClaudeAdapterV2({
         instanceId: ClaudeAdapterV2.CLAUDE_DEFAULT_INSTANCE_ID,
@@ -2205,6 +2209,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             if (event.type === "turn.terminal") {
               yield* Queue.offer(terminalReceipts, event);
             }
+            if (event.type === "provider_thread.updated") {
+              yield* Queue.offer(providerThreadReceipts, event);
+            }
             if (event.type === "turn_item.updated" && event.turnItem.type === "system_notice") {
               yield* Queue.offer(systemNoticeReceipts, event);
             }
@@ -2240,6 +2247,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         events,
         terminalReceipts,
         systemNoticeReceipts,
+        providerThreadReceipts,
         getOpenedOptions: () => openedOptions,
         terminalEvents,
         hasPendingBackgroundWork,
@@ -3633,6 +3641,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         Effect.gen(function* () {
           const harness = yield* makeWakeHarness;
           const now = yield* DateTime.now;
+          const attemptId = RunAttemptId.make("attempt-claude-roster-fallback");
           const emptyRoster = claudeSdkFrame({
             type: "system",
             subtype: "background_tasks_changed",
@@ -3646,14 +3655,22 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               threadId: harness.threadId,
               providerThread: harness.providerThread,
               now,
-              attemptId: RunAttemptId.make("attempt-claude-roster-fallback"),
+              attemptId,
               text: "Run the build in the background.",
               attachments: [],
             }),
           );
-          yield* Queue.offer(harness.sdkMessages, wakeTaskStarted);
+          yield* harness.offerAndWait(wakeTaskStarted);
+          const activeRoster = yield* Stream.fromQueue(harness.providerThreadReceipts).pipe(
+            Stream.filter(
+              (event) => (event.providerThread.pendingBackgroundTasks?.length ?? 0) > 0,
+            ),
+            Stream.take(1),
+            Stream.runCollect,
+          );
+          assert.equal(activeRoster[0]?.runAttemptId, attemptId);
           yield* Queue.offer(harness.sdkMessages, turnOneResult);
-          yield* awaitUntil(() => harness.terminalEvents().length === 1, "first turn terminal");
+          yield* Queue.take(harness.terminalReceipts);
 
           const afterStart = providerThreadRosterEvents(harness.events).filter(
             (event) => (event.providerThread.pendingBackgroundTasks?.length ?? 0) > 0,
@@ -3664,16 +3681,17 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             WAKE_TASK_ID,
           );
 
-          yield* Queue.offer(harness.sdkMessages, emptyRoster);
-          yield* awaitUntil(
-            () =>
-              providerThreadRosterEvents(harness.events).some(
-                (event) =>
-                  event.providerThread.status === "idle" &&
-                  (event.providerThread.pendingBackgroundTasks?.length ?? 0) === 0,
-              ),
-            "empty roster clear",
+          yield* harness.offerAndWait(emptyRoster);
+          const idleRoster = yield* Stream.fromQueue(harness.providerThreadReceipts).pipe(
+            Stream.filter(
+              (event) =>
+                event.providerThread.status === "idle" &&
+                (event.providerThread.pendingBackgroundTasks?.length ?? 0) === 0,
+            ),
+            Stream.take(1),
+            Stream.runCollect,
           );
+          assert.isUndefined(idleRoster[0]?.runAttemptId, "between-turn rosters are session-owned");
           assert.isFalse(yield* harness.hasPendingBackgroundWork);
         }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
       ),
@@ -9494,12 +9512,13 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       Effect.gen(function* () {
         const harness = yield* makeWakeHarness;
         const condition = "all tests pass";
+        const attemptId = RunAttemptId.make("goal-attempt");
         yield* harness.runtime.startTurn(
           makeClaudeTestTurnInput({
             threadId: harness.threadId,
             providerThread: harness.providerThread,
             now: yield* DateTime.now,
-            attemptId: RunAttemptId.make("goal-attempt"),
+            attemptId,
             text: `/goal ${condition}`,
             attachments: [],
           }),
@@ -9515,6 +9534,13 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         }
         const terminal = yield* Queue.take(harness.terminalReceipts);
         assert.equal(terminal.status, "completed");
+        assert.deepEqual(
+          providerThreadRosterEvents(harness.events)
+            .filter((event) => event.providerThread.goal != null)
+            .map((event) => event.runAttemptId),
+          [attemptId, attemptId, attemptId],
+          "goal frames and settlement retain their originating attempt",
+        );
         assert.deepEqual(goalStatuses(harness.events), [
           { objective: condition, status: "active", checks: 0 },
           {

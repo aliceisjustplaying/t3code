@@ -6608,6 +6608,7 @@ export function makeAcpAdapterV2(
           yield* emitProviderEvent({
             type: "provider_thread.updated",
             driver,
+            runAttemptId: context.input.attemptId,
             providerThread: updatedProviderThread,
           });
           yield* emitProviderEvent(
@@ -7015,6 +7016,7 @@ export function makeAcpAdapterV2(
             yield* emitProviderEvent({
               type: "provider_thread.updated",
               driver,
+              runAttemptId: turnInput.attemptId,
               providerThread: activeProviderThread,
             });
             yield* rememberSnapshotMessage({
