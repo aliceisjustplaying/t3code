@@ -1263,6 +1263,43 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
       }),
     );
 
+    it.effect.each([
+      { namespace: "heads", locked: false },
+      { namespace: "tags", locked: false },
+      { namespace: "heads", locked: true },
+      { namespace: "tags", locked: true },
+    ])(
+      "classifies atomic ref collision under refs/$namespace (locked=$locked)",
+      ({ namespace, locked }) =>
+        Effect.gen(function* () {
+          const cwd = yield* makeTmpDir();
+          const driver = yield* GitVcsDriver.GitVcsDriver;
+          yield* initRepoWithCommit(cwd);
+          const ref = `refs/${namespace}/existing`;
+          if (locked) {
+            const fs = yield* FileSystem.FileSystem;
+            const path = yield* Path.Path;
+            yield* fs.makeDirectory(path.join(cwd, ".git", "refs", namespace), { recursive: true });
+            yield* writeTextFile(cwd, `.git/${ref}.lock`, "");
+          } else {
+            yield* git(cwd, ["update-ref", ref, "HEAD"]);
+          }
+          const error = yield* driver
+            .execute({
+              operation: "GitVcsDriver.test.atomicRefCollision",
+              cwd,
+              args: ["update-ref", ref, "HEAD", "0".repeat(40)],
+              env: { LC_ALL: "C" },
+            })
+            .pipe(Effect.flip);
+          if (namespace === "heads") {
+            assert.equal(error.reason, "branch_already_exists");
+          } else {
+            assert.notProperty(error, "reason");
+          }
+        }),
+    );
+
     it.effect("leaves a tag collision unclassified rather than calling it a path", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();
@@ -2745,6 +2782,38 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
       }),
     );
 
+    it.effect("gives concurrent renames to one name distinct suffixes and keeps their config", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const sources = Array.from({ length: 6 }, (_, index) => `t3/source-${index}`);
+        for (const source of sources) {
+          yield* driver.createRef({ cwd, refName: source });
+          yield* git(cwd, ["config", `branch.${source}.gh-merge-base`, "main"]);
+        }
+
+        const renamed = yield* Effect.all(
+          sources.map((oldBranch) =>
+            driver.renameBranch({ cwd, oldBranch, newBranch: "feature/shared" }),
+          ),
+          { concurrency: "unbounded" },
+        );
+
+        assert.deepEqual(renamed.map((result) => result.branch).toSorted(), [
+          "feature/shared",
+          "feature/shared-1",
+          "feature/shared-2",
+          "feature/shared-3",
+          "feature/shared-4",
+          "feature/shared-5",
+        ]);
+        for (const { branch } of renamed) {
+          assert.equal(yield* git(cwd, ["config", `branch.${branch}.gh-merge-base`]), "main");
+        }
+      }),
+    );
+
     it.effect("returns the existing refName when rename source and target match", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();
@@ -3597,6 +3666,48 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
             );
           }
         }),
+    );
+
+    it.effect("shares one running fetch of a ref between concurrent callers", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const delegate = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const started = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        let fetches = 0;
+        const spawner = ChildProcessSpawner.make((command) =>
+          Effect.gen(function* () {
+            if (!ChildProcess.isStandardCommand(command))
+              return yield* Effect.die("unexpected command");
+            if (command.args[0] !== "fetch") return yield* delegate.spawn(command);
+            fetches += 1;
+            yield* Deferred.succeed(started, undefined);
+            return ChildProcessSpawner.makeHandle({
+              ...makeNonRepositoryHandle(),
+              exitCode: Deferred.await(release).pipe(Effect.as(ChildProcessSpawner.ExitCode(0))),
+              stderr: Stream.empty,
+            });
+          }),
+        );
+        const driver = yield* makeGitVcsDriverCore().pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          Effect.provide(layerServerConfig),
+        );
+        const fetch = driver.fetchRemote({ cwd, remoteName: "origin", refName: "main" });
+        const first = yield* fetch.pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Deferred.await(started);
+        const joined = yield* Effect.forEach(Array.from({ length: 5 }), () =>
+          fetch.pipe(Effect.forkChild({ startImmediately: true })),
+        );
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(first);
+        yield* Effect.forEach(joined, Fiber.join);
+        assert.equal(fetches, 1);
+
+        // A finished fetch is not reused.
+        yield* fetch;
+        assert.equal(fetches, 2);
+      }),
     );
 
     it.effect("creates a worktree from the latest fetched remote commit", () =>

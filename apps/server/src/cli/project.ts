@@ -32,10 +32,7 @@ import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolv
 import * as ProjectService from "../project/ProjectService.ts";
 import { projectMutationOperation } from "../project/ProjectMutation.ts";
 import * as T3ProjectFileLoader from "../project/T3ProjectFileLoader.ts";
-import {
-  clearPersistedServerRuntimeState,
-  readPersistedServerRuntimeState,
-} from "../serverRuntimeState.ts";
+import { PersistedServerRuntimeState } from "../serverRuntimeState.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { type CliAuthLocationFlags, projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
 
@@ -49,6 +46,9 @@ type ProjectCommandExecutionMode = "live" | "offline";
 type ProjectCliDispatchCommand = ProjectMutation;
 
 const isEnvironmentHttpCommonError = Schema.is(EnvironmentHttpCommonError);
+const decodeServerRuntimeState = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(PersistedServerRuntimeState),
+);
 
 export class ProjectCommandIdGenerationError extends Schema.TaggedError<ProjectCommandIdGenerationError>()(
   "ProjectCommandIdGenerationError",
@@ -98,6 +98,41 @@ export class ProjectLiveServerRequestError extends Schema.TaggedError<ProjectLiv
 ) {
   override get message(): string {
     return "Failed to call the running server.";
+  }
+}
+
+export class ProjectLiveServerUnavailableError extends Schema.TaggedError<ProjectLiveServerUnavailableError>()(
+  "ProjectLiveServerUnavailableError",
+  {
+    statePath: Schema.String,
+    origin: Schema.String,
+    pid: Schema.Int,
+    cause: Schema.Defect(),
+  },
+) {
+  override get message(): string {
+    return (
+      `The server recorded in ${this.statePath} (pid ${this.pid}, ${this.origin}) did not complete ` +
+      "the project request. No project change was sent or written offline, and the recorded " +
+      "state was kept. Retry once that server responds; if none runs for this base directory, " +
+      "starting one replaces the recorded state."
+    );
+  }
+}
+
+export class ProjectRuntimeStateUnreadableError extends Schema.TaggedError<ProjectRuntimeStateUnreadableError>()(
+  "ProjectRuntimeStateUnreadableError",
+  {
+    statePath: Schema.String,
+    cause: Schema.Defect(),
+  },
+) {
+  override get message(): string {
+    return (
+      `Server runtime state at ${this.statePath} could not be read or is invalid, so whether a ` +
+      "server owns this base directory is unknown. No project change was written, and the state " +
+      "was kept."
+    );
   }
 }
 
@@ -158,6 +193,8 @@ export const ProjectCommandError = Schema.Union([
   ProjectLiveServerDeclaredResponseError,
   ProjectLiveServerUndeclaredStatusError,
   ProjectLiveServerRequestError,
+  ProjectLiveServerUnavailableError,
+  ProjectRuntimeStateUnreadableError,
   ProjectTitleEmptyError,
   ProjectIdentifierEmptyError,
   ProjectNotFoundError,
@@ -338,6 +375,32 @@ const dispatchLiveOrchestrationCommand = (
     Effect.mapError(projectCommandErrorFromLiveServerRequest),
   );
 
+/**
+ * Read the persisted runtime state without turning a failed read into absence.
+ * Only a missing file proves that no server recorded ownership.
+ */
+const readServerRuntimeStateForProjectCommand = Effect.fn(
+  "readServerRuntimeStateForProjectCommand",
+)(function* (statePath: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const raw = yield* fs.readFileString(statePath).pipe(
+    Effect.matchEffect({
+      onFailure: (cause) =>
+        cause.reason._tag === "NotFound"
+          ? Effect.succeed(Option.none<string>())
+          : Effect.fail(new ProjectRuntimeStateUnreadableError({ statePath, cause })),
+      onSuccess: (contents) => Effect.succeedSome(contents),
+    }),
+  );
+  if (Option.isNone(raw)) {
+    return Option.none<PersistedServerRuntimeState>();
+  }
+  return yield* decodeServerRuntimeState(raw.value.trim()).pipe(
+    Effect.asSome,
+    Effect.mapError((cause) => new ProjectRuntimeStateUnreadableError({ statePath, cause })),
+  );
+});
+
 const getOfflineSnapshot = Effect.fn("getOfflineSnapshot")(function* () {
   const projects = yield* ProjectService.ProjectService;
   return yield* projects.snapshot;
@@ -348,7 +411,9 @@ const tryResolveLiveProjectExecutionMode = Effect.fn("tryResolveLiveProjectExecu
     environmentAuth: EnvironmentAuth.EnvironmentAuth["Service"],
     config: ServerConfig.ServerConfig["Service"],
   ) {
-    const runtimeState = yield* readPersistedServerRuntimeState(config.serverRuntimeStatePath);
+    const runtimeState = yield* readServerRuntimeStateForProjectCommand(
+      config.serverRuntimeStatePath,
+    );
     if (Option.isNone(runtimeState)) {
       return Option.none<{ readonly origin: string }>();
     }
@@ -370,8 +435,16 @@ const tryResolveLiveProjectExecutionMode = Effect.fn("tryResolveLiveProjectExecu
       origin: runtimeState.value.origin,
       cause: attempted.failure,
     });
-    yield* clearPersistedServerRuntimeState(config.serverRuntimeStatePath);
-    return Option.none<{ readonly origin: string }>();
+    // A failed request does not prove the recorded server is gone: a paused
+    // server, one in another pid namespace, or a successor that replaced the
+    // state meanwhile may own the database. The CLI cannot prove exclusive
+    // ownership, so it keeps the state and does not write offline.
+    return yield* new ProjectLiveServerUnavailableError({
+      statePath: config.serverRuntimeStatePath,
+      origin: runtimeState.value.origin,
+      pid: runtimeState.value.pid,
+      cause: attempted.failure,
+    });
   },
 );
 

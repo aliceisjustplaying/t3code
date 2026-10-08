@@ -14,6 +14,7 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
@@ -31,6 +32,7 @@ import * as RuntimeRequestService from "./RuntimeRequestService.ts";
 import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 
 const threadId = ThreadId.make("thread:effect-worker-restart");
 const oldSessionId = ProviderSessionId.make("provider-session:effect-worker-restart:old");
@@ -839,4 +841,162 @@ it.effect("settles a delegated child once its restart continuation fails for goo
       assert.deepEqual(yield* Ref.get(recovered), [threadId]);
     }).pipe(Effect.provide(layer));
   }),
+);
+
+it.effect.each(["success", "failure", "retry", "cancel"] as const)(
+  "frees a leased worker while retaining ordering and drain settlement (%s)",
+  (outcome) =>
+    Effect.gen(function* () {
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const started = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const interrupted = yield* Deferred.make<void>();
+      const otherStarted = yield* Deferred.make<void>();
+      const firstId = "effect:a-lease";
+      const otherId = "effect:b-independent";
+      const followId = "effect:c-followup";
+      const firstThread = ThreadId.make("thread:lease-first");
+      yield* outbox.enqueue([
+        {
+          id: firstId,
+          commandId: CommandId.make("command:lease-first"),
+          threadId: firstThread,
+          request: { type: "terminal.cleanup" },
+        },
+        {
+          id: otherId,
+          commandId: CommandId.make("command:lease-other"),
+          threadId: ThreadId.make("thread:lease-other"),
+          request: { type: "terminal.cleanup" },
+        },
+        {
+          id: followId,
+          commandId: CommandId.make("command:lease-follow"),
+          threadId: firstThread,
+          request: { type: "terminal.cleanup" },
+        },
+      ]);
+      const layerExecutor = Layer.succeed(
+        EffectWorker.OrchestrationEffectExecutorV2,
+        EffectWorker.OrchestrationEffectExecutorV2.of({
+          execute: (effect) =>
+            effect.id === firstId
+              ? Deferred.succeed(started, undefined).pipe(
+                  Effect.andThen(Deferred.await(release)),
+                  Effect.andThen(
+                    outcome === "failure" || outcome === "retry"
+                      ? Effect.die("lease executor failure")
+                      : Effect.void,
+                  ),
+                  Effect.onInterrupt(() => Deferred.succeed(interrupted, undefined)),
+                )
+              : effect.id === otherId
+                ? Deferred.succeed(otherStarted, undefined).pipe(Effect.asVoid)
+                : Effect.void,
+        }),
+      );
+      yield* Effect.gen(function* () {
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const first = yield* worker.runOnce.pipe(Effect.forkChild);
+        yield* Deferred.await(started);
+        yield* TestClock.adjust("30 seconds");
+        assert.isTrue(yield* Fiber.join(first));
+        assert.isTrue(yield* worker.runOnce);
+        yield* Deferred.await(otherStarted);
+        const status = (id: string) =>
+          outbox.get(id).pipe(Effect.map(Option.map((row) => row.status)));
+        assert.deepEqual(yield* status(firstId), Option.some("running"));
+        assert.deepEqual(yield* status(followId), Option.some("pending"));
+        const draining = yield* worker.drain().pipe(Effect.forkChild);
+        assert.isUndefined(draining.pollUnsafe());
+        if (outcome === "cancel") {
+          yield* outbox.signalCancellations(
+            yield* outbox.cancelUnsettled({
+              threadId: firstThread,
+              effectTypes: ["terminal.cleanup"],
+              reason: "test cancellation",
+            }),
+          );
+          yield* Deferred.await(interrupted);
+        } else {
+          yield* Deferred.succeed(release, undefined);
+        }
+        yield* Fiber.join(draining);
+        if (outcome === "retry") {
+          assert.deepEqual(yield* status(firstId), Option.some("pending"));
+          assert.deepEqual(yield* status(followId), Option.some("pending"));
+          yield* TestClock.adjust("100 millis");
+          yield* worker.drain();
+        }
+        assert.deepEqual(
+          yield* status(firstId),
+          Option.some(
+            outcome === "success"
+              ? "succeeded"
+              : outcome === "failure" || outcome === "retry"
+                ? "failed"
+                : "cancelled",
+          ),
+        );
+        assert.deepEqual(
+          yield* status(followId),
+          Option.some(outcome === "cancel" ? "cancelled" : "succeeded"),
+        );
+      }).pipe(
+        Effect.provide(
+          EffectWorker.layerWithOptions({ maxAttempts: outcome === "retry" ? 2 : 1 }).pipe(
+            Layer.provide(
+              Layer.merge(Layer.succeed(EffectOutbox.EffectOutboxV2, outbox), layerExecutor),
+            ),
+          ),
+        ),
+      );
+    }).pipe(Effect.provide(EffectOutbox.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)))),
+);
+
+it.effect.each([false, true])(
+  "interrupts settlement when its owning scope closes (detached=%s)",
+  (detached) =>
+    Effect.gen(function* () {
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const started = yield* Deferred.make<void>();
+      const stopped = yield* Deferred.make<void>();
+      yield* outbox.enqueue([
+        {
+          id: "effect:scope-close",
+          commandId: CommandId.make("command:scope-close"),
+          threadId: ThreadId.make("thread:scope-close"),
+          request: { type: "terminal.cleanup" },
+        },
+      ]);
+      const executor = Layer.succeed(
+        EffectWorker.OrchestrationEffectExecutorV2,
+        EffectWorker.OrchestrationEffectExecutorV2.of({
+          execute: () =>
+            Deferred.succeed(started, undefined).pipe(
+              Effect.andThen(Effect.never),
+              Effect.onInterrupt(() => Deferred.succeed(stopped, undefined)),
+            ),
+        }),
+      );
+      yield* Effect.gen(function* () {
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const running = yield* worker.runOnce.pipe(Effect.forkScoped);
+        yield* Deferred.await(started);
+        if (detached) {
+          yield* TestClock.adjust("30 seconds");
+          assert.isTrue(yield* Fiber.join(running));
+        }
+      }).pipe(
+        Effect.provide(
+          EffectWorker.layerWithOptions().pipe(
+            Layer.provide(
+              Layer.merge(Layer.succeed(EffectOutbox.EffectOutboxV2, outbox), executor),
+            ),
+          ),
+        ),
+        Effect.scoped,
+      );
+      assert.isTrue(yield* Deferred.isDone(stopped));
+    }).pipe(Effect.provide(EffectOutbox.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)))),
 );

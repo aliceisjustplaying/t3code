@@ -5,12 +5,14 @@ import * as SqlClient from "effect/sql/SqlClient";
 import { parseHeadsUpNotice } from "../../orchestration-v2/HeadsUpNotice.ts";
 
 import migrateMcpAppModelContext from "./059_McpAppModelContext.ts";
+import migrateThreadSnapshotWindowIndexes from "./060_ThreadSnapshotWindowIndexes.ts";
 
 export default Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
-  // Existing fork databases used migration 59 for YSK, before upstream used
-  // that ID for MCP apps. Apply its idempotent schema change here as well.
+  // Fork builds used upstream IDs 59 and 60 for YSK. The migrator skips
+  // recorded IDs, so apply both idempotent upstream changes before reconciling.
   yield* migrateMcpAppModelContext;
+  yield* migrateThreadSnapshotWindowIndexes;
   // Older retained notices predate typed headsUp metadata. Backfill all of
   // them, not just the loaded/recent chat windows. Paging bounds migration RAM.
   let after = "";
@@ -43,6 +45,8 @@ export default Effect.gen(function* () {
   // Both changes now exist; reconcile the old fork ledger with upstream's ID.
   yield* sql`UPDATE effect_sql_migrations SET name = 'McpAppModelContext'
     WHERE migration_id = 59 AND name = 'HeadsUpInbox'`;
+  yield* sql`UPDATE effect_sql_migrations SET name = 'ThreadSnapshotWindowIndexes'
+    WHERE migration_id = 60 AND name = 'HeadsUpInbox'`;
   yield* sql`CREATE INDEX IF NOT EXISTS orchestration_v2_heads_up_identity_idx
     ON orchestration_v2_projection_turn_items (
       COALESCE(json_extract(payload_json, '$.headsUp.sourceThreadId'), thread_id),

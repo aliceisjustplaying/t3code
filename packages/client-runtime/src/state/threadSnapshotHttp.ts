@@ -5,9 +5,11 @@ import * as Option from "effect/Option";
 
 import * as RemoteEnvironmentAuthorization from "../authorization/service.ts";
 import type { PreparedConnection } from "../connection/model.ts";
-import { environmentEndpointUrl } from "../environment/endpoint.ts";
 import * as ManagedRelay from "../relay/managedRelay.ts";
-import type { RemoteEnvironmentRequestError } from "../rpc/http.ts";
+import {
+  makeEnvironmentHttpApiUrlBuilder,
+  type RemoteEnvironmentRequestError,
+} from "../rpc/http.ts";
 import {
   executeAuthenticatedEnvironmentHttpRequest,
   withOrchestrationProtocolHeader,
@@ -66,7 +68,9 @@ export const fetchEnvironmentThreadSnapshot = Effect.fn(
     group: "orchestration",
     method: "GET",
     url: (httpBaseUrl) =>
-      environmentEndpointUrl(httpBaseUrl, `/api/orchestration/threads/${input.threadId}`),
+      makeEnvironmentHttpApiUrlBuilder(httpBaseUrl).orchestration.threadSnapshot({
+        params: { threadId: input.threadId },
+      }),
     timeoutMs: input.timeoutMs ?? DEFAULT_THREAD_SNAPSHOT_TIMEOUT_MS,
     request: ({ client, headers }) =>
       client.threadSnapshot({

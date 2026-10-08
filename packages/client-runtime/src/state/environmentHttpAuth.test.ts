@@ -4,15 +4,19 @@ import {
   ORCHESTRATION_PROTOCOL_HEADER,
   ORCHESTRATION_PROTOCOL_VERSION_TEXT,
   ProjectId,
+  ThreadId,
   type AuthSessionState,
   type OrchestrationV2ShellSnapshot,
   OrchestrationV2ThreadDetailSnapshot,
   OrchestrationV2ThreadBoundedSnapshot,
   type OrchestrationV2ThreadHistoryPage,
 } from "@t3tools/contracts";
+import { verifyDpopProof } from "@t3tools/shared/dpop";
 import { RelayClientTracer } from "@t3tools/shared/relayTracing";
+import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Base64Url from "effect/encoding/Base64Url";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -296,7 +300,7 @@ describe("authenticated environment HTTP requests", () => {
       expect(harness.proofs).toEqual([
         {
           method: loader.method,
-          url: `${CURRENT_ORIGIN}${loader.path}`,
+          url: call.url,
           accessToken: "current-token",
         },
       ]);
@@ -363,7 +367,7 @@ describe("authenticated environment HTTP requests", () => {
         );
         expect(harness.proofs[1]).toEqual({
           method: "GET",
-          url: `${RENEWED_ORIGIN}${loader.path}`,
+          url: retried.url,
           accessToken: "renewed-token",
         });
         if (loader.name === "older thread history") {
@@ -532,8 +536,8 @@ describe("authenticated environment HTTP requests", () => {
       );
 
       expect(error).toMatchObject({
-        _tag: "RemoteEnvironmentAuthFetchError",
-        message: "The environment rejected the renewed session authorization.",
+        _tag: "EnvironmentAuthInvalidError",
+        reason: "invalid_credential",
       });
       expect(harness.calls).toHaveLength(2);
     }),
@@ -670,6 +674,111 @@ describe("authenticated environment HTTP requests", () => {
       });
       expect(harness.calls).toEqual([]);
     }),
+  );
+});
+
+// Delegated threads join percent-encoded parts with ":" (see IdAllocator.joinId).
+const DELEGATED_THREAD_ID = ThreadId.make("thread:delegated-task:command%3Amcp%3Adelegate-1");
+
+/** Signs real ES256 proofs the way the web and mobile signers do. */
+const makeEs256Signer = Effect.gen(function* () {
+  const keyPair = yield* Effect.promise(() =>
+    crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"]),
+  );
+  const { kty, crv, x, y } = yield* Effect.promise(() =>
+    crypto.subtle.exportKey("jwk", keyPair.publicKey),
+  );
+  const encodeJson = (value: unknown) => Base64Url.encode(JSON.stringify(value));
+  let proofCount = 0;
+  return ManagedRelay.ManagedRelayDpopSigner.of({
+    thumbprint: Effect.succeed("test-thumbprint"),
+    createProof: (input) =>
+      Effect.gen(function* () {
+        const htu = new URL(input.url);
+        htu.search = "";
+        htu.hash = "";
+        const header = encodeJson({ typ: "dpop+jwt", alg: "ES256", jwk: { kty, crv, x, y } });
+        const payload = encodeJson({
+          htm: input.method,
+          htu: htu.toString(),
+          jti: `proof-${++proofCount}`,
+          iat: Math.floor((yield* Clock.currentTimeMillis) / 1_000),
+        });
+        const signature = yield* Effect.promise(() =>
+          crypto.subtle.sign(
+            { name: "ECDSA", hash: "SHA-256" },
+            keyPair.privateKey,
+            new TextEncoder().encode(`${header}.${payload}`),
+          ),
+        );
+        return `${header}.${payload}.${Base64Url.encode(new Uint8Array(signature))}`;
+      }),
+  });
+});
+
+const DELEGATED_THREAD_LOADERS: ReadonlyArray<{
+  readonly name: string;
+  readonly response: unknown;
+  readonly load: (
+    input: HttpInput,
+  ) => Effect.Effect<unknown, RemoteEnvironmentRequestError, HttpClient.HttpClient>;
+}> = [
+  {
+    name: "thread snapshot",
+    response: encodeThreadSnapshot(THREAD),
+    load: (input) =>
+      ThreadSnapshotLoader.fetchEnvironmentThreadSnapshot({
+        ...input,
+        threadId: DELEGATED_THREAD_ID,
+      }),
+  },
+  {
+    name: "bounded thread snapshot",
+    response: encodeBoundedSnapshot(BOUNDED_THREAD),
+    load: (input) =>
+      fetchEnvironmentBoundedThreadSnapshot({ ...input, threadId: DELEGATED_THREAD_ID }),
+  },
+  {
+    name: "older thread history",
+    response: THREAD_HISTORY,
+    load: (input) =>
+      fetchEnvironmentThreadHistoryPage({
+        ...input,
+        threadId: DELEGATED_THREAD_ID,
+        cursor: "older-page",
+      }),
+  },
+];
+
+describe("DPoP proofs for delegated thread IDs", () => {
+  it.effect.each(DELEGATED_THREAD_LOADERS)(
+    "binds the $name proof to the URL the server receives",
+    (loader) =>
+      Effect.gen(function* () {
+        const harness = makeHarness(() => Response.json(loader.response));
+        const signer = yield* makeEs256Signer;
+        yield* loader
+          .load({ ...harness.input, signer: Option.some(signer) })
+          .pipe(Effect.provide(harness.httpLayer));
+
+        expect(harness.calls).toHaveLength(1);
+        const call = harness.calls[0]!;
+        expect(new URL(call.url).pathname).toContain(
+          "/threads/thread%3Adelegated-task%3Acommand%253Amcp%253Adelegate-1",
+        );
+        const result = verifyDpopProof({
+          proof: new Headers(call.init.headers).get("dpop"),
+          method: call.init.method ?? "GET",
+          url: call.url,
+          nowEpochSeconds: Math.floor((yield* Clock.currentTimeMillis) / 1_000),
+        });
+        expect(result).toEqual({
+          ok: true,
+          thumbprint: expect.any(String),
+          jti: expect.any(String),
+          iat: expect.any(Number),
+        });
+      }),
   );
 });
 

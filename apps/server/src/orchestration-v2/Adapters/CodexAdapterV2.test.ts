@@ -65,6 +65,7 @@ import * as ProviderReplayHarness from "../testkit/ProviderReplayHarness.ts";
 import {
   ProviderAdapterForkThreadError,
   ProviderAdapterOpenSessionError,
+  ProviderAdapterProtocolError,
   ProviderAdapterRollbackThreadError,
   ProviderAdapterV2RuntimePolicy,
   type ProviderAdapterV2Event,
@@ -2325,6 +2326,295 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       assert.lengthOf(harness.terminalEvents(), 1);
       assert.isFalse(yield* harness.hasPendingBackgroundWork);
     }).pipe(Effect.scoped, Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+  );
+
+  it.effect("stops a turn Codex starts after its turn/start was abandoned", () =>
+    Effect.gen(function* () {
+      const nativeThreadId = "abandoned-start-thread";
+      const nativeTurnId = "abandoned-start-turn";
+      const prompt = "Run a command.";
+      const preamble = codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt });
+      const transcript = makeCodexReplayTranscript({
+        scenario: "abandoned-turn-start",
+        entries: [
+          // Codex never answers turn/start, then starts the turn anyway.
+          ...preamble.slice(0, -2),
+          {
+            type: "emit_inbound",
+            label: "turn/started",
+            afterMs: 1000,
+            frame: {
+              method: "turn/started",
+              params: {
+                threadId: nativeThreadId,
+                turn: makeCodexReplayTurn({ id: nativeTurnId, status: "inProgress" }),
+              },
+            },
+          },
+          {
+            type: "expect_outbound",
+            label: "turn/interrupt",
+            frame: {
+              id: 4,
+              method: "turn/interrupt",
+              params: { threadId: nativeThreadId, turnId: nativeTurnId },
+            },
+          },
+          { type: "emit_inbound", label: "turn/interrupt", frame: { id: 4, result: {} } },
+        ],
+      });
+      const interruptSent = yield* Deferred.make<void>();
+      const harness = yield* makeCodexReplayHarness(
+        transcript,
+        () => Effect.void,
+        (method) =>
+          method === "turn/interrupt"
+            ? Deferred.succeed(interruptSent, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+      );
+      const starting = yield* harness.runtime
+        .startTurn(
+          makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("abandoned-start-attempt"),
+            text: prompt,
+          }),
+        )
+        .pipe(Effect.forkScoped);
+      yield* TestClock.adjust("500 millis");
+      // The provider request deadline gives up on the start.
+      yield* Fiber.interrupt(starting);
+      assert.isFalse(yield* Deferred.isDone(interruptSent));
+      yield* TestClock.adjust("500 millis");
+      yield* Deferred.await(interruptSent);
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+  );
+
+  it.effect.each(["notification", "response"] as const)(
+    "stops an abandoned turn during registration from a %s",
+    (registrationSource) =>
+      Effect.gen(function* () {
+        const nativeThreadId = "abandoned-registered-thread";
+        const nativeTurnId = "abandoned-registered-turn";
+        const prompt = "Run a command.";
+        const preamble = codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt });
+        const transcript = makeCodexReplayTranscript({
+          scenario: "abandoned-registered-turn-start",
+          entries: [
+            ...preamble.slice(0, -2),
+            // Exercise registration both before the reply and from the reply itself.
+            registrationSource === "notification" ? preamble.at(-1)! : preamble.at(-2)!,
+            {
+              type: "expect_outbound",
+              label: "turn/interrupt",
+              frame: {
+                id: 4,
+                method: "turn/interrupt",
+                params: { threadId: nativeThreadId, turnId: nativeTurnId },
+              },
+            },
+            { type: "emit_inbound", label: "turn/interrupt", frame: { id: 4, result: {} } },
+          ],
+        });
+        const interruptSent = yield* Deferred.make<void>();
+        const turnRegistered = yield* Deferred.make<void>();
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        let cancelRegistration = () => {};
+        let registrationInterrupted = false;
+        const harness = yield* makeCodexReplayHarness(
+          transcript,
+          (event) =>
+            event.type === "provider_turn.updated" &&
+            event.providerTurn.nativeTurnRef?.nativeId === nativeTurnId
+              ? Deferred.succeed(turnRegistered, undefined)
+              : Effect.void,
+          (method) =>
+            method === "turn/interrupt"
+              ? Deferred.succeed(interruptSent, undefined).pipe(Effect.asVoid)
+              : Effect.void,
+        ).pipe(
+          Effect.provideService(IdAllocator.IdAllocatorV2, {
+            ...idAllocator,
+            derive: {
+              ...idAllocator.derive,
+              providerTurn: (input) => {
+                const id = idAllocator.derive.providerTurn(input);
+                // Cancel inside registration, before an active turn record exists.
+                if (registrationSource === "response" && input.nativeTurnId === nativeTurnId) {
+                  registrationInterrupted = true;
+                  cancelRegistration();
+                }
+                return id;
+              },
+            },
+          }),
+        );
+        const turnInput = makeCodexTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId: RunAttemptId.make("abandoned-registered-attempt"),
+          text: prompt,
+        });
+        const starting = yield* Effect.withFiber((fiber) => {
+          cancelRegistration = () => fiber.interruptUnsafe();
+          return harness.runtime.startTurn(turnInput);
+        }).pipe(Effect.forkScoped);
+        if (registrationSource === "response") {
+          yield* Fiber.await(starting);
+          assert.isTrue(registrationInterrupted);
+        } else {
+          yield* Deferred.await(turnRegistered);
+          assert.isFalse(yield* Deferred.isDone(interruptSent));
+          yield* Fiber.interrupt(starting);
+        }
+        yield* Deferred.await(interruptSent);
+      }).pipe(Effect.scoped, Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+  );
+
+  it.effect.each([false, true])(
+    "blocks retry until abandonment resolves (interruptFails=%s)",
+    (interruptFails) =>
+      Effect.gen(function* () {
+        const nativeThreadId = "abandoned-then-retried-thread";
+        const abandonedTurnId = "abandoned-turn";
+        const retriedTurnId = "retried-turn";
+        const prompt = "Run a command.";
+        const preamble = codexReplayPreamble({
+          nativeThreadId,
+          nativeTurnId: abandonedTurnId,
+          prompt,
+        });
+        const firstStart = preamble.at(-3)!;
+        if (firstStart.type !== "expect_outbound") return yield* Effect.die("expected turn/start");
+        const transcript = makeCodexReplayTranscript({
+          scenario: "abandoned-turn-start-then-retry",
+          entries: [
+            ...preamble.slice(0, -2),
+            {
+              type: "emit_inbound",
+              label: "turn/started/abandoned",
+              afterMs: 1000,
+              frame: {
+                method: "turn/started",
+                params: {
+                  threadId: nativeThreadId,
+                  turn: makeCodexReplayTurn({ id: abandonedTurnId, status: "inProgress" }),
+                },
+              },
+            },
+            {
+              type: "expect_outbound",
+              label: "turn/interrupt",
+              frame: {
+                id: 4,
+                method: "turn/interrupt",
+                params: { threadId: nativeThreadId, turnId: abandonedTurnId },
+              },
+            },
+            {
+              type: "emit_inbound",
+              label: "turn/interrupt",
+              afterMs: 1000,
+              frame: interruptFails
+                ? { id: 4, error: { code: -32603, message: "Interrupt rejected" } }
+                : { id: 4, result: {} },
+            },
+            // Duplicate orphan notifications must never be adopted by the retry.
+            {
+              type: "emit_inbound",
+              label: "turn/started/duplicate",
+              frame: {
+                method: "turn/started",
+                params: {
+                  threadId: nativeThreadId,
+                  turn: makeCodexReplayTurn({ id: abandonedTurnId, status: "inProgress" }),
+                },
+              },
+            },
+            ...(interruptFails
+              ? []
+              : [
+                  {
+                    type: "expect_outbound" as const,
+                    label: "turn/start/retry",
+                    frame: { ...(firstStart.frame as object), id: 5 },
+                  },
+                  {
+                    type: "emit_inbound" as const,
+                    label: "turn/start/retry",
+                    frame: {
+                      id: 5,
+                      result: {
+                        turn: makeCodexReplayTurn({ id: retriedTurnId, status: "inProgress" }),
+                      },
+                    },
+                  },
+                ]),
+          ],
+        });
+        const registeredTurns: Array<string> = [];
+        const retryRegistered = yield* Deferred.make<void>();
+        const firstStartSent = yield* Deferred.make<void>();
+        const interruptSent = yield* Deferred.make<void>();
+        const harness = yield* makeCodexReplayHarness(
+          transcript,
+          (event) => {
+            if (event.type === "provider_turn.updated") {
+              const nativeId = event.providerTurn.nativeTurnRef?.nativeId;
+              if (nativeId != null && !registeredTurns.includes(nativeId))
+                registeredTurns.push(nativeId);
+              if (nativeId === retriedTurnId) return Deferred.succeed(retryRegistered, undefined);
+            }
+            return Effect.void;
+          },
+          (method) =>
+            method === "turn/start"
+              ? Deferred.succeed(firstStartSent, undefined).pipe(Effect.asVoid)
+              : method === "turn/interrupt"
+                ? Deferred.succeed(interruptSent, undefined).pipe(Effect.asVoid)
+                : Effect.void,
+        );
+        const turnInput = (attempt: string) =>
+          Effect.map(DateTime.now, (now) =>
+            makeCodexTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId: RunAttemptId.make(attempt),
+              text: prompt,
+            }),
+          );
+        const starting = yield* harness.runtime
+          .startTurn(yield* turnInput("abandoned-attempt"))
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(firstStartSent);
+        yield* TestClock.adjust("0 millis");
+        yield* Fiber.interrupt(starting);
+        const assertBlocked = () =>
+          Effect.gen(function* () {
+            const error = yield* harness.runtime
+              .startTurn(yield* turnInput("blocked-attempt"))
+              .pipe(Effect.flip);
+            assert.instanceOf(error.cause, ProviderAdapterProtocolError);
+            assert.include(errorCauseChainText(error), "unresolved abandoned turn start");
+          });
+        yield* assertBlocked();
+        yield* TestClock.adjust("1 second");
+        yield* Deferred.await(interruptSent);
+        yield* assertBlocked();
+        yield* TestClock.adjust("1 second");
+        if (interruptFails) {
+          yield* assertBlocked();
+          assert.deepEqual(registeredTurns, []);
+        } else {
+          yield* harness.runtime.startTurn(yield* turnInput("retried-attempt"));
+          yield* Deferred.await(retryRegistered);
+          assert.deepEqual(registeredTurns, [retriedTurnId]);
+        }
+      }).pipe(Effect.scoped, Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
   );
 
   it.effect("settles Stop when a queued native turn fails before starting", () =>

@@ -4,8 +4,8 @@ import * as Option from "effect/Option";
 
 import type { RemoteEnvironmentAuthorization } from "../authorization/service.ts";
 import type { PreparedConnection } from "../connection/model.ts";
-import { environmentEndpointUrl } from "../environment/endpoint.ts";
 import * as ManagedRelay from "../relay/managedRelay.ts";
+import { makeEnvironmentHttpApiUrlBuilder } from "../rpc/http.ts";
 import {
   executeAuthenticatedEnvironmentHttpRequest,
   withOrchestrationProtocolHeader,
@@ -30,7 +30,10 @@ export const fetchEnvironmentThreadHistoryPage = Effect.fn(
     group: "orchestration",
     method: "GET",
     url: (httpBaseUrl) =>
-      environmentEndpointUrl(httpBaseUrl, `/api/orchestration/threads/${input.threadId}/history`),
+      makeEnvironmentHttpApiUrlBuilder(httpBaseUrl).orchestration.threadHistoryPage({
+        params: { threadId: input.threadId },
+        query: { cursor: input.cursor },
+      }),
     timeoutMs: input.timeoutMs ?? DEFAULT_THREAD_HISTORY_TIMEOUT_MS,
     request: ({ client, headers }) =>
       client.threadHistoryPage({

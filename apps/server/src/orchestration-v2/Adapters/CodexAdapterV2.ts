@@ -1834,6 +1834,41 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
           ).hasSubagents = true;
         };
         const pendingRootTurns = yield* Ref.make(new Map<string, ProviderAdapterV2TurnInput>());
+        // A cancelled request may still start in Codex. Without a native turn ID,
+        // neither completion tracking nor unsubscribe proves that request is gone.
+        const abandonedTurnStarts = new Set<string>();
+        const blockedAbandonedThreads = new Set<string>();
+        const requireResolvedStart = (nativeThreadId: string) =>
+          abandonedTurnStarts.has(nativeThreadId) || blockedAbandonedThreads.has(nativeThreadId)
+            ? toProtocolError(
+                "Codex thread has an unresolved abandoned turn start or unacknowledged interrupt; recreate the runtime if it cannot be resolved.",
+              )
+            : Effect.void;
+        const stoppedAbandonedTurns = new Set<string>();
+        const stopAbandonedTurn = (nativeThreadId: string, nativeTurnId: string) =>
+          Effect.suspend(() => {
+            if (stoppedAbandonedTurns.has(nativeTurnId)) return Effect.void;
+            stoppedAbandonedTurns.add(nativeTurnId);
+            blockedAbandonedThreads.add(nativeThreadId);
+            return client
+              .request("turn/interrupt", {
+                threadId: nativeThreadId,
+                turnId: nativeTurnId,
+              })
+              .pipe(
+                Effect.timeout("2 minutes"),
+                Effect.tap(() => Effect.sync(() => blockedAbandonedThreads.delete(nativeThreadId))),
+                Effect.catchCause((cause) =>
+                  Effect.logWarning("orchestration-v2.codex-abandoned-turn-stop-failed", {
+                    nativeThreadId,
+                    nativeTurnId,
+                    cause,
+                  }),
+                ),
+                Effect.forkIn(scope),
+                Effect.asVoid,
+              );
+          });
         const turnWaiters = yield* Ref.make(new Map<string, Deferred.Deferred<void, never>>());
         const subagentThreads = yield* Ref.make(new Map<string, CodexSubagentThreadContext>());
         const subagentSelections = new Map<string, Omit<ModelSelection, "instanceId">>();
@@ -4378,6 +4413,13 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
               }
               return;
             }
+            if (stoppedAbandonedTurns.has(payload.turn.id)) return;
+            // No retry is admitted until this orphan's interrupt is acknowledged.
+            if (abandonedTurnStarts.has(payload.threadId)) {
+              abandonedTurnStarts.delete(payload.threadId);
+              yield* stopAbandonedTurn(payload.threadId, payload.turn.id);
+              return;
+            }
             const pendingRootTurn = (yield* Ref.get(pendingRootTurns)).get(payload.threadId);
             if (pendingRootTurn !== undefined) {
               yield* registerRootTurn({
@@ -6188,6 +6230,7 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
               omitServiceTier: adapterOptions.resolveRuntime !== undefined,
               ...(turnInput.appContext === undefined ? {} : { appContext: turnInput.appContext }),
             });
+            yield* requireResolvedStart(threadId);
             yield* Ref.update(pendingRootTurns, (current) => {
               const updated = new Map(current);
               updated.set(threadId, turnInput);
@@ -6200,19 +6243,41 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
               else next.delete(threadId);
               return next;
             });
-            const started = yield* client.request("turn/start", turnStartParams);
-            yield* registerRootTurn({
-              turnInput,
-              nativeTurnId: started.turn.id,
-              startedAt: codexTimestamp(started.turn.startedAt),
-              waitForNativeStart: started.turn.startedAt === null,
-            });
+            let returnedNativeTurnId: string | undefined;
+            yield* Effect.uninterruptibleMask((restore) =>
+              Effect.gen(function* () {
+                const started = yield* restore(client.request("turn/start", turnStartParams));
+                // Retain the reply before registration can be interrupted.
+                returnedNativeTurnId = started.turn.id;
+                yield* restore(
+                  registerRootTurn({
+                    turnInput,
+                    nativeTurnId: started.turn.id,
+                    startedAt: codexTimestamp(started.turn.startedAt),
+                    waitForNativeStart: started.turn.startedAt === null,
+                  }),
+                );
+              }),
+            ).pipe(
+              Effect.onInterrupt(() =>
+                Effect.gen(function* () {
+                  const registered = Array.from((yield* Ref.get(activeTurns)).values()).find(
+                    (context) => context.input === turnInput,
+                  );
+                  const nativeTurnId = returnedNativeTurnId ?? registered?.nativeTurnId;
+                  if (nativeTurnId !== undefined) {
+                    return yield* stopAbandonedTurn(threadId, nativeTurnId);
+                  }
+                  abandonedTurnStarts.add(threadId);
+                }),
+              ),
+            );
           }).pipe(
             Effect.ensuring(
               Effect.flatMap(getNativeThreadId(turnInput.providerThread), (threadId) =>
                 Ref.update(pendingRootTurns, (current) => {
                   const updated = new Map(current);
-                  updated.delete(threadId);
+                  if (updated.get(threadId) === turnInput) updated.delete(threadId);
                   return updated;
                 }),
               ).pipe(Effect.ignore),
@@ -6229,6 +6294,7 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
         const runGoalCommand = (turnInput: ProviderAdapterV2TurnInput, command: CodexGoalCommand) =>
           Effect.gen(function* () {
             const threadId = yield* getNativeThreadId(turnInput.providerThread);
+            yield* requireResolvedStart(threadId);
             // Goal notifications during the command belong to this run's snapshot.
             rootProviderThreads.set(threadId, turnInput.providerThread);
             const readGoal = client

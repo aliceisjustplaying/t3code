@@ -1,6 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import {
+  EnvironmentAuthInvalidError,
   ORCHESTRATION_PROTOCOL_HEADER,
   ORCHESTRATION_PROTOCOL_VERSION_TEXT,
 } from "@t3tools/contracts";
@@ -214,9 +215,11 @@ const executeEnvironmentRequest = Effect.fnUntraced(function* <
           rejectedAccessToken = authorization.accessToken;
           continue;
         }
-        return yield* new RemoteEnvironmentAuthFetchError({
-          message: "The environment rejected the renewed session authorization.",
-          cause: result.success,
+        return yield* new EnvironmentAuthInvalidError({
+          code: "auth_invalid",
+          reason: "invalid_credential",
+          // Rejection is detected locally from a 200 response, not a server error.
+          traceId: (yield* Effect.currentSpan.pipe(Effect.orDie)).traceId,
         });
       }
       return result.success;

@@ -2,6 +2,7 @@ import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
 import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
 // @effect-diagnostics nodeBuiltinImport:off - CLI integration uses temporary Node paths.
 import * as NodeFS from "node:fs";
+import * as NodeHttp from "node:http";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
@@ -23,6 +24,10 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as References from "effect/References";
 import * as Stream from "effect/Stream";
+import * as Cause from "effect/Cause";
+import * as Exit from "effect/Exit";
+import * as TestClock from "effect/testing/TestClock";
+import * as TestConsole from "effect/testing/TestConsole";
 import { Command } from "effect/cli";
 
 import { cli } from "../binCli.ts";
@@ -38,6 +43,10 @@ import * as ProjectService from "../project/ProjectService.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import * as T3ProjectFileLoader from "../project/T3ProjectFileLoader.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
+import {
+  makePersistedServerRuntimeState,
+  persistServerRuntimeState,
+} from "../serverRuntimeState.ts";
 import {
   ProjectLiveServerDeclaredResponseError,
   ProjectLiveServerRequestError,
@@ -440,6 +449,174 @@ it.layer(NodeServices.layer)("project lookup with unavailable workspaces", (it) 
         [project.id],
       );
       assert.isTrue(NodeFS.existsSync(workspaceRoot));
+    }),
+  );
+});
+
+const withPrimaryServer = <A, E, R>(
+  handler: NodeHttp.RequestListener,
+  run: (port: number) => Effect.Effect<A, E, R>,
+) =>
+  Effect.acquireUseRelease(
+    Effect.callback<NodeHttp.Server>((resume) => {
+      const server = NodeHttp.createServer(handler);
+      server.once("error", (cause) => resume(Effect.die(cause)));
+      server.listen(0, "127.0.0.1", () => resume(Effect.succeed(server)));
+    }),
+    (server) => {
+      const address = server.address();
+      if (address === null || typeof address === "string") {
+        return Effect.die(new Error("Expected a TCP address"));
+      }
+      return run(address.port);
+    },
+    (server) =>
+      Effect.callback<void>((resume) => {
+        server.close((cause) => resume(cause ? Effect.die(cause) : Effect.void));
+        server.closeAllConnections();
+      }),
+  );
+
+const runtimeStatePath = (baseDir: string) =>
+  NodePath.join(baseDir, "userdata", "server-runtime.json");
+
+const persistPrimaryDescriptor = Effect.fn("ProjectCliTest.persistPrimaryDescriptor")(function* (
+  baseDir: string,
+  input: { readonly port: number; readonly pid: number },
+) {
+  const statePath = runtimeStatePath(baseDir);
+  const state = yield* makePersistedServerRuntimeState({
+    config: { host: "127.0.0.1", devUrl: undefined },
+    port: input.port,
+  });
+  yield* persistServerRuntimeState({ path: statePath, state: { ...state, pid: input.pid } });
+  return { statePath, bytes: NodeFS.readFileSync(statePath) };
+});
+
+// pid 2**22 + 1 exceeds any default Linux/macOS pid range. It also stands for a
+// primary in another pid namespace, which the CLI cannot see either.
+const DEAD_PID = 4_194_305;
+
+const runCliCapturingOutput = (args: ReadonlyArray<string>) =>
+  Effect.gen(function* () {
+    // Console output accumulates across CLI runs within a test.
+    const earlier = (yield* TestConsole.logLines).length;
+    // The CLI request timeout runs on the live clock, like the native executable.
+    const exit = yield* Effect.exit(TestClock.withLive(runCli(args)));
+    const lines = (yield* TestConsole.logLines)
+      .slice(earlier)
+      .filter((line): line is string => typeof line === "string");
+    return { exit, output: lines.join("\n") };
+  });
+
+const assertFailedWith = (exit: Exit.Exit<unknown, unknown>, tag: string): Error => {
+  if (!Exit.isFailure(exit)) {
+    return assert.fail(`Expected the command to fail with ${tag}.`);
+  }
+  const error = Cause.squash(exit.cause);
+  assert.propertyVal(error, "_tag", tag);
+  return error as Error;
+};
+
+const addNextWorkspace = (baseDir: string, workspaceRoot: string) => {
+  const nextWorkspace = `${workspaceRoot}-next`;
+  NodeFS.mkdirSync(nextWorkspace);
+  return runCliCapturingOutput(["project", "add", nextWorkspace, "--base-dir", baseDir]).pipe(
+    Effect.map((result) => ({ ...result, nextWorkspace })),
+  );
+};
+
+it.layer(NodeServices.layer)("project registration against a persisted primary", (it) => {
+  it.effect.each([
+    // Accepts the request and never answers, like a primary paused under load.
+    {
+      failure: "a live primary does not answer",
+      pid: process.pid,
+      handler: (() => undefined) as NodeHttp.RequestListener,
+    },
+    {
+      failure: "a live primary drops the connection",
+      pid: process.pid,
+      handler: ((request) => request.socket.destroy()) as NodeHttp.RequestListener,
+    },
+    // A pid the CLI cannot see proves nothing: the primary may run in another
+    // pid namespace, so a dead-looking pid must not authorize an offline write.
+    {
+      failure: "the recorded pid is not visible",
+      pid: DEAD_PID,
+      handler: ((request) => request.socket.destroy()) as NodeHttp.RequestListener,
+    },
+  ])("keeps the descriptor and writes no project when $failure", ({ handler, pid }) =>
+    withPrimaryServer(handler, (port) =>
+      Effect.gen(function* () {
+        const { baseDir, workspaceRoot, project } = yield* makeProjectLookupFixture();
+        const descriptor = yield* persistPrimaryDescriptor(baseDir, { port, pid });
+
+        const { exit, output } = yield* addNextWorkspace(baseDir, workspaceRoot);
+
+        const error = assertFailedWith(exit, "ProjectLiveServerUnavailableError");
+        assert.include(error.message, "No project change was sent or written offline");
+        assert.notInclude(output, "Added project");
+        assert.deepEqual(NodeFS.readFileSync(descriptor.statePath), descriptor.bytes);
+        assert.deepEqual(
+          (yield* readProjects(baseDir)).projects.map((entry) => entry.id),
+          [project.id],
+        );
+      }),
+    ),
+  );
+
+  it.effect("keeps a descriptor whose origin no longer listens and writes no project", () =>
+    Effect.gen(function* () {
+      const { baseDir, workspaceRoot, project } = yield* makeProjectLookupFixture();
+      // Reserve a port, then release it so nothing answers on the recorded origin.
+      const port = yield* withPrimaryServer(
+        () => undefined,
+        (port) => Effect.succeed(port),
+      );
+      const descriptor = yield* persistPrimaryDescriptor(baseDir, { port, pid: DEAD_PID });
+
+      const { exit, output } = yield* addNextWorkspace(baseDir, workspaceRoot);
+
+      assertFailedWith(exit, "ProjectLiveServerUnavailableError");
+      assert.notInclude(output, "Added project");
+      assert.deepEqual(NodeFS.readFileSync(descriptor.statePath), descriptor.bytes);
+      assert.deepEqual(
+        (yield* readProjects(baseDir)).projects.map((entry) => entry.id),
+        [project.id],
+      );
+    }),
+  );
+
+  it.effect.each([
+    { state: "is not JSON", write: (path: string) => NodeFS.writeFileSync(path, "{not json") },
+    {
+      state: "does not match the runtime schema",
+      write: (path: string) => NodeFS.writeFileSync(path, JSON.stringify({ version: 2, pid: 1 })),
+    },
+    { state: "is empty", write: (path: string) => NodeFS.writeFileSync(path, "") },
+    { state: "cannot be read as a file", write: (path: string) => NodeFS.mkdirSync(path) },
+  ])("writes no project when the runtime state $state", ({ write }) =>
+    Effect.gen(function* () {
+      const { baseDir, workspaceRoot, project } = yield* makeProjectLookupFixture();
+      const statePath = runtimeStatePath(baseDir);
+      NodeFS.mkdirSync(NodePath.dirname(statePath), { recursive: true });
+      write(statePath);
+      const before = NodeFS.statSync(statePath).isFile() ? NodeFS.readFileSync(statePath) : null;
+
+      const { exit, output } = yield* addNextWorkspace(baseDir, workspaceRoot);
+
+      const error = assertFailedWith(exit, "ProjectRuntimeStateUnreadableError");
+      assert.include(error.message, statePath);
+      assert.notInclude(output, "Added project");
+      assert.isTrue(NodeFS.existsSync(statePath), "The runtime state must not be removed.");
+      if (before !== null) {
+        assert.deepEqual(NodeFS.readFileSync(statePath), before);
+      }
+      assert.deepEqual(
+        (yield* readProjects(baseDir)).projects.map((entry) => entry.id),
+        [project.id],
+      );
     }),
   );
 });

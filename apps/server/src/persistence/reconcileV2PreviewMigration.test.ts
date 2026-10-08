@@ -150,7 +150,7 @@ it.effect("upgrades fork migration 59 without losing YSK or skipping MCP app sto
     const sql = yield* SqlClient.SqlClient;
     yield* runMigrations();
     // Recreate the previous fork's ledger and schema: YSK owned 59.
-    yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id = 60`;
+    yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id >= 60`;
     yield* sql`UPDATE effect_sql_migrations SET name = 'HeadsUpInbox' WHERE migration_id = 59`;
     yield* sql`DROP TABLE mcp_app_model_context`;
     yield* runMigrations();

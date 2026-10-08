@@ -74,7 +74,7 @@ import Migration0057 from "./Migrations/057_ScheduledTaskWebhooks.ts";
 import Migration0058 from "./Migrations/058_WebhookRelayDeliveries.ts";
 import Migration0059 from "./Migrations/059_McpAppModelContext.ts";
 import Migration0060 from "./Migrations/060_ThreadSnapshotWindowIndexes.ts";
-import HeadsUpInboxMigration from "./Migrations/060_HeadsUpInbox.ts";
+import HeadsUpInboxMigration from "./Migrations/061_HeadsUpInbox.ts";
 
 /**
  * Migration loader with all migrations defined inline.
