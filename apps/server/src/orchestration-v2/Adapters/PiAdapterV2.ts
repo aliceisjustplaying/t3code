@@ -508,7 +508,26 @@ export function makePiAdapterV2(
        * turn. Its events are held for the continuation turn it asks the
        * orchestrator for, or for a user turn that starts first.
        */
-      let wake: { readonly events: Array<PiRpcRecord>; dropped: boolean } | null = null;
+      let wake: {
+        readonly events: Array<PiRpcRecord>;
+        readonly generation: number;
+        dropped: boolean;
+      } | null = null;
+      let wakeGeneration = 0;
+      let replacingNativeSession = false;
+      let quarantinedWakeEvents: Array<PiRpcRecord> = [];
+      let sessionClosed = false;
+      const invalidateWake = () => {
+        wakeGeneration += 1;
+        if (wake !== null) wake.dropped = true;
+        wake = null;
+      };
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          sessionClosed = true;
+          invalidateWake();
+        }),
+      );
       let appliedModel: string | null = null;
       let appliedThinking: string | null = null;
       /** Last thread title synced into pi's session name (`/resume` listing). */
@@ -573,6 +592,7 @@ export function makePiAdapterV2(
       const updateProviderThread = (
         state: PiThreadState,
         patch: Partial<OrchestrationV2ProviderThread>,
+        runAttemptId?: ProviderAdapter.ProviderAdapterV2TurnInput["attemptId"],
       ) =>
         Effect.gen(function* () {
           const updatedAt = yield* DateTime.now;
@@ -580,6 +600,7 @@ export function makePiAdapterV2(
           yield* emit({
             type: "provider_thread.updated",
             driver: PI_PROVIDER,
+            ...(runAttemptId === undefined ? {} : { runAttemptId }),
             providerThread: state.providerThread,
           });
         });
@@ -612,9 +633,35 @@ export function makePiAdapterV2(
       };
 
       const lifecycleRequest = (record: PiRpcRecord) =>
-        request(record, PI_SESSION_TIMEOUT_MS).pipe(
-          // A local timeout does not cancel Pi's lifecycle hook. Retire the
-          // process before fallback can race its eventual switch/new-session.
+        Effect.gen(function* () {
+          replacingNativeSession = true;
+          // A veto returns before Pi aborts the outgoing runtime. Retire saved
+          // callbacks now, but keep its output until the outcome is known.
+          quarantinedWakeEvents = wake?.events ?? [];
+          invalidateWake();
+          const result = yield* request(record, PI_SESSION_TIMEOUT_MS);
+          // Drain outgoing events before discarding them or reoffering the
+          // unchanged run after an explicit veto.
+          const drained = yield* Deferred.make<void>();
+          const accepted = yield* Queue.offer(connection.events, {
+            type: "t3.session_replaced",
+            cancelled: recordField(result, "cancelled") === true,
+            drained,
+          });
+          if (accepted) yield* Deferred.await(drained);
+          return result;
+        }).pipe(
+          // Errors can happen before or after native teardown, and a local
+          // timeout/interrupt does not cancel Pi's hook. Only an explicit veto
+          // proves the outgoing runtime is safe to keep.
+          Effect.onError(() => connection.terminate),
+          Effect.ensuring(
+            Effect.sync(() => {
+              if (replacingNativeSession) invalidateWake();
+              quarantinedWakeEvents = [];
+              replacingNativeSession = false;
+            }),
+          ),
           Effect.tapError((error) =>
             Effect.logWarning("Pi session lifecycle request failed", {
               providerSessionId: input.providerSessionId,
@@ -622,11 +669,6 @@ export function makePiAdapterV2(
               errorTag: error._tag,
             }),
           ),
-          Effect.catchTags({
-            PiRpcTimeoutError: (error) =>
-              connection.terminate.pipe(Effect.andThen(Effect.fail(error))),
-          }),
-          Effect.onInterrupt(() => connection.terminate),
         );
 
       const tokenUsageFromStats = (
@@ -1560,7 +1602,11 @@ export function makePiAdapterV2(
         if (turn === null) return;
         state.activeTurn = null;
         if (turn.interrupted || !readUsage) {
-          yield* updateProviderThread(state, { pendingBackgroundTasks: [] });
+          yield* updateProviderThread(
+            state,
+            { pendingBackgroundTasks: [] },
+            turn.turnInput.attemptId,
+          );
         }
         if (turn.failure === null) turn.failure = turn.promptRejection;
         const completedAt = yield* DateTime.now;
@@ -1604,12 +1650,16 @@ export function makePiAdapterV2(
             ...(tokenUsage === undefined ? {} : { tokenUsage }),
           },
         });
-        yield* updateProviderThread(state, {
-          status: "idle",
-          ...(treeRefs?.leafId == null
-            ? {}
-            : { nativeConversationHeadRef: providerRef(treeRefs.leafId) }),
-        });
+        yield* updateProviderThread(
+          state,
+          {
+            status: "idle",
+            ...(treeRefs?.leafId == null
+              ? {}
+              : { nativeConversationHeadRef: providerRef(treeRefs.leafId) }),
+          },
+          turn.turnInput.attemptId,
+        );
         yield* updateProviderSession(
           failure !== null ? "error" : "ready",
           failure?.message ?? null,
@@ -1670,24 +1720,32 @@ export function makePiAdapterV2(
 
       // ── event pump ────────────────────────────────────────
 
-      const updateBackgroundWork = (state: PiThreadState, pending: boolean) => {
+      const updateBackgroundWork = (
+        state: PiThreadState,
+        pending: boolean,
+        runAttemptId?: ProviderAdapter.ProviderAdapterV2TurnInput["attemptId"],
+      ) => {
         const tasks = state.providerThread.pendingBackgroundTasks ?? [];
         if (tasks.some((task) => task.taskId === "pi:background-work") === pending)
           return Effect.void;
-        return updateProviderThread(state, {
-          pendingBackgroundTasks: [
-            ...tasks.filter((task) => task.taskId !== "pi:background-work"),
-            ...(pending
-              ? [
-                  {
-                    taskId: "pi:background-work",
-                    kind: "background_task" as const,
-                    description: "Pi background work or pending wake-up",
-                  },
-                ]
-              : []),
-          ],
-        });
+        return updateProviderThread(
+          state,
+          {
+            pendingBackgroundTasks: [
+              ...tasks.filter((task) => task.taskId !== "pi:background-work"),
+              ...(pending
+                ? [
+                    {
+                      taskId: "pi:background-work",
+                      kind: "background_task" as const,
+                      description: "Pi background work or pending wake-up",
+                    },
+                  ]
+                : []),
+            ],
+          },
+          runAttemptId,
+        );
       };
 
       // The keepalive includes held wake-ups, not just running processes.
@@ -1697,6 +1755,19 @@ export function makePiAdapterV2(
         Effect.gen(function* () {
           const state = threadState;
           const providerThread = state?.providerThread;
+          const generation = wakeGeneration;
+          if (sessionClosed || replacingNativeSession) return true;
+          const commands = recordField(yield* request({ type: "get_commands" }, 2_000), "commands");
+          if (
+            !Array.isArray(commands) ||
+            !commands.some(
+              (command) =>
+                recordString(command, "name") === "t3-background-work" &&
+                recordString(command, "source") === "extension",
+            )
+          )
+            return false;
+          if (sessionClosed || replacingNativeSession || generation !== wakeGeneration) return true;
           const probe = yield* Deferred.make<boolean>();
           backgroundProbe = probe;
           yield* request({ type: "prompt", message: "/t3-background-work" }, 2_000);
@@ -1706,6 +1777,9 @@ export function makePiAdapterV2(
           yield* sessionEventPermit.withPermits(1)(
             Effect.gen(function* () {
               if (
+                sessionClosed ||
+                replacingNativeSession ||
+                generation !== wakeGeneration ||
                 state === null ||
                 state !== threadState ||
                 state.activeTurn !== null ||
@@ -1771,8 +1845,19 @@ export function makePiAdapterV2(
         );
       };
 
-      const holdWake = Effect.fnUntraced(function* (state: PiThreadState, event: PiRpcRecord) {
-        const held = { events: [event], dropped: false };
+      const holdWake = Effect.fnUntraced(function* (
+        state: PiThreadState,
+        heldEvents: Array<PiRpcRecord>,
+      ) {
+        if (sessionClosed || replacingNativeSession || state !== threadState) return;
+        const held = { events: heldEvents, generation: wakeGeneration, dropped: false };
+        const isCurrent = () =>
+          !sessionClosed &&
+          !replacingNativeSession &&
+          !held.dropped &&
+          held.generation === wakeGeneration &&
+          wake === held &&
+          state === threadState;
         wake = held;
         yield* Effect.logInfo("Pi started a turn on its own; asking for a continuation.", {
           providerThreadId: state.providerThread.id,
@@ -1783,11 +1868,13 @@ export function makePiAdapterV2(
           driver: PI_PROVIDER,
           detail: null,
           dispatchIfCurrent: (dispatch) =>
-            held.dropped ? Effect.succeed(Option.none()) : Effect.map(dispatch, Option.some),
+            Effect.suspend(() =>
+              isCurrent() ? Effect.map(dispatch, Option.some) : Effect.succeed(Option.none()),
+            ),
           // No turn will take it (the thread was archived): stop the run.
           clearIfCurrent: () =>
             Effect.gen(function* () {
-              if (held.dropped) return;
+              if (!isCurrent()) return;
               held.dropped = true;
               if (wake === held) wake = null;
               yield* connection.send({ type: "abort" }).pipe(Effect.ignore);
@@ -1804,7 +1891,7 @@ export function makePiAdapterV2(
           (type === "message_end" &&
             recordString(event["message"], "customType") === "pi-wake:job");
         if (
-          wake !== null &&
+          (wake !== null || replacingNativeSession) &&
           turn === null &&
           type !== "response" &&
           !type.startsWith("t3.") &&
@@ -1814,13 +1901,34 @@ export function makePiAdapterV2(
             recordString(event, "statusKey") === "t3:background-work"
           )
         ) {
-          wake.events.push(event);
-          return;
+          // Lifecycle hooks may need a dialog answered before returning a
+          // veto. Those requests must reach the UI rather than the quarantine.
+          if (!replacingNativeSession || type !== "extension_ui_request") {
+            if (replacingNativeSession) quarantinedWakeEvents.push(event);
+            else wake?.events.push(event);
+            return;
+          }
         }
         switch (event["type"]) {
+          case "t3.session_replaced": {
+            const heldEvents = quarantinedWakeEvents;
+            quarantinedWakeEvents = [];
+            invalidateWake();
+            replacingNativeSession = false;
+            if (
+              event["cancelled"] === true &&
+              state !== null &&
+              heldEvents.some((held) => held["type"] === "agent_start")
+            ) {
+              yield* holdWake(state, heldEvents);
+            }
+            yield* Deferred.succeed(event["drained"] as Deferred.Deferred<void>, undefined);
+            return;
+          }
           case "agent_start": {
+            if (sessionClosed || replacingNativeSession) return;
             if (turn === null && state !== null) {
-              yield* holdWake(state, event);
+              yield* holdWake(state, [event]);
               return;
             }
             if (turn === null) {
@@ -2221,7 +2329,11 @@ export function makePiAdapterV2(
             ) {
               turn.settleWhenIdle = false;
               if (state !== null) {
-                yield* updateBackgroundWork(state, event["pendingBackgroundWork"] === true);
+                yield* updateBackgroundWork(
+                  state,
+                  event["pendingBackgroundWork"] === true,
+                  turn.turnInput.attemptId,
+                );
                 yield* finalizeTurn(state);
               }
             }
@@ -2241,6 +2353,8 @@ export function makePiAdapterV2(
         Effect.catchCause((cause) =>
           sessionEventPermit.withPermits(1)(
             Effect.gen(function* () {
+              sessionClosed = true;
+              invalidateWake();
               // Transport death finalizes any live turn. Stop-with-restart
               // closes the provider stream cleanly; only an unexpected death
               // is surfaced as an event-stream failure.
@@ -2301,6 +2415,7 @@ export function makePiAdapterV2(
         if (threadState !== null && threadState.activeTurn !== null) {
           return yield* protocolError("Cannot register a Pi thread while a turn is active");
         }
+        invalidateWake();
         const existing = threadInput.existingProviderThread;
         const resumeId = existing?.nativeThreadRef?.nativeId;
         const needsNewSession = resumeId == null && registrationAttempted;
@@ -2714,18 +2829,25 @@ export function makePiAdapterV2(
                 threadId: turnInput.threadId,
                 providerTurn,
               });
-              yield* updateProviderThread(state, {
-                status: "active",
-                firstRunOrdinal: state.providerThread.firstRunOrdinal ?? turnInput.runOrdinal,
-                lastRunOrdinal: turnInput.runOrdinal,
-              });
+              yield* updateProviderThread(
+                state,
+                {
+                  status: "active",
+                  firstRunOrdinal: state.providerThread.firstRunOrdinal ?? turnInput.runOrdinal,
+                  lastRunOrdinal: turnInput.runOrdinal,
+                },
+                turnInput.attemptId,
+              );
               yield* updateProviderSession("running", null);
               if (outOfTurnExtensionErrors.length > 0) {
                 yield* Queue.offer(connection.events, { type: "t3.flush_extension_errors" });
               }
               // Whichever turn starts first takes a held run; the other
               // continuation finds nothing and settles once Pi is idle.
-              const held = wake;
+              const held =
+                !sessionClosed && !replacingNativeSession && wake?.generation === wakeGeneration
+                  ? wake
+                  : null;
               wake = null;
               if (held !== null) held.dropped = true;
               activeTurn.awaitingPromptAck = held !== null && payload !== null;
@@ -3089,7 +3211,18 @@ export function makePiAdapterV2(
             }
             const forkData = yield* lifecycleRequest({ type: "fork", entryId: forkEntryId });
             if (recordField(forkData, "cancelled") === true) {
-              return yield* protocolError("A Pi extension cancelled the session fork");
+              return yield* protocolError("A Pi extension cancelled the session fork").pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapter.ProviderAdapterRollbackThreadError({
+                      driver: PI_PROVIDER,
+                      providerThreadId: rollbackInput.providerThread.id,
+                      checkpointId: rollbackInput.target.checkpointId,
+                      nativeSessionUnchanged: true,
+                      cause,
+                    }),
+                ),
+              );
             }
             yield* retireJobs;
             // Pi fork replaces the session file, including for rollback. Persist
@@ -3125,14 +3258,15 @@ export function makePiAdapterV2(
             });
             return piThreadSnapshot(state.providerThread);
           }).pipe(
-            Effect.mapError(
-              (cause) =>
-                new ProviderAdapter.ProviderAdapterRollbackThreadError({
-                  driver: PI_PROVIDER,
-                  providerThreadId: rollbackInput.providerThread.id,
-                  checkpointId: rollbackInput.target.checkpointId,
-                  cause,
-                }),
+            Effect.mapError((cause) =>
+              cause._tag === "ProviderAdapterRollbackThreadError"
+                ? cause
+                : new ProviderAdapter.ProviderAdapterRollbackThreadError({
+                    driver: PI_PROVIDER,
+                    providerThreadId: rollbackInput.providerThread.id,
+                    checkpointId: rollbackInput.target.checkpointId,
+                    cause,
+                  }),
             ),
           ),
         forkThread: (forkInput) =>

@@ -1,6 +1,7 @@
-import { threadJobs, jobIsActive, jobStateLabel } from "@t3tools/client-runtime/jobs";
+import { jobIsActive, jobStateLabel } from "@t3tools/client-runtime/jobs";
 import { formatDuration } from "@t3tools/shared/orchestrationTiming";
 import { ThreadJobDetails } from "./ThreadJobDetails";
+import { useThreadJobs } from "./useThreadJobs";
 import type { ScreenHeaderMenu } from "../../components/ScreenHeader.types";
 import { makeTurnCommandMetadata } from "../../lib/commandMetadata";
 import { buildProjectThreadStartTurnInput } from "../../lib/projectThreadStartTurn";
@@ -21,6 +22,7 @@ import {
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
   ThreadId,
+  type TurnItemId,
   type ProjectScript,
 } from "@t3tools/contracts";
 import {
@@ -247,10 +249,31 @@ function ThreadRouteContent(
   );
   const selectedThreadDetailState = props.selectedThreadDetailState;
   const selectedThreadDetail = Option.getOrNull(selectedThreadDetailState.data);
-  const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
+  const [selectedJobId, setSelectedJobId] = useState<{
+    environmentId: EnvironmentId;
+    threadId: ThreadId;
+    itemId: TurnItemId;
+  } | null>(null);
+  useEffect(() => {
+    setSelectedJobId(null);
+  }, [selectedThread?.environmentId, selectedThread?.id]);
   const handleHeadsUpDraftReady = useCallback(() => setSelectedJobId(null), []);
-  const jobs = threadJobs(selectedThreadDetail?.turnItems ?? []);
-  const selectedJob = jobs.find((job) => job.turnItemId === selectedJobId);
+  const jobsPage = useThreadJobs(
+    selectedThread === null
+      ? null
+      : {
+          environmentId: selectedThread.environmentId,
+          threadId: selectedThread.id,
+        },
+    selectedThreadDetail?.turnItems ?? [],
+  );
+  const jobs = jobsPage.jobs;
+  const selectedJob =
+    selectedJobId?.environmentId === selectedThread?.environmentId &&
+    selectedJobId?.threadId === selectedThread?.id
+      ? selectedJobId
+      : null;
+  const selectedJobSummary = jobs.find((job) => job.turnItemId === selectedJob?.itemId);
   const jobMenuItem = (job: (typeof jobs)[number]) => ({
     id: job.turnItemId,
     title: job.name,
@@ -261,28 +284,53 @@ function ThreadRouteContent(
     ]
       .filter(Boolean)
       .join(" · "),
-    onPress: () => setSelectedJobId(job.turnItemId),
+    onPress: () => {
+      if (selectedThread !== null)
+        setSelectedJobId({
+          environmentId: selectedThread.environmentId,
+          threadId: selectedThread.id,
+          itemId: job.turnItemId,
+        });
+    },
   });
   const recentJobs = jobs.slice(0, 5);
   const olderJobs = jobs.slice(5);
-  const jobsMenu: ScreenHeaderMenu | undefined = jobs.length
-    ? {
-        title: "Jobs · " + jobs.filter(jobIsActive).length + " running",
-        icon: "terminal",
-        items: [
-          ...recentJobs.map(jobMenuItem),
-          ...(olderJobs.length
-            ? [
-                {
-                  id: "older-jobs",
-                  title: "Older jobs (" + olderJobs.length + ")",
-                  items: olderJobs.map(jobMenuItem),
-                },
-              ]
-            : []),
-        ],
-      }
-    : undefined;
+  const jobsMenu: ScreenHeaderMenu | undefined =
+    jobs.length || jobsPage.isPending || jobsPage.error
+      ? {
+          title: "Jobs · " + jobs.filter(jobIsActive).length + " running",
+          icon: "terminal",
+          items: [
+            ...recentJobs.map(jobMenuItem),
+            ...(jobsPage.isPending
+              ? [{ id: "jobs-loading", title: "Loading jobs…", disabled: true, onPress: () => {} }]
+              : []),
+            ...(jobsPage.error
+              ? [{ id: "jobs-retry", title: "Retry loading jobs", onPress: jobsPage.refresh }]
+              : []),
+            ...(jobsPage.hasMore
+              ? [
+                  {
+                    id: "jobs-load-older",
+                    title: "Load older jobs",
+                    disabled: jobsPage.isPending,
+                    onPress: jobsPage.loadOlder,
+                  },
+                ]
+              : []),
+            ...(olderJobs.length
+              ? [
+                  {
+                    id: "older-jobs",
+                    title: "Older jobs (" + olderJobs.length + ")",
+                    items: olderJobs.map(jobMenuItem),
+                  },
+                ]
+              : []),
+          ],
+        }
+      : undefined;
+
   const { selectedThreadCwd } = useSelectedThreadWorktree();
   const composer = useThreadComposerState();
   const gitState = useSelectedThreadGitState();
@@ -1090,9 +1138,11 @@ function ThreadRouteContent(
 
       {selectedJob ? (
         <ThreadJobDetails
-          environmentId={environmentId}
-          threadId={ThreadId.make(threadId)}
-          job={selectedJob}
+          key={`${selectedJob.environmentId}:${selectedJob.threadId}:${selectedJob.itemId}`}
+          environmentId={selectedJob.environmentId}
+          threadId={selectedJob.threadId}
+          itemId={selectedJob.itemId}
+          liveJob={selectedJobSummary}
           onClose={() => setSelectedJobId(null)}
         />
       ) : (

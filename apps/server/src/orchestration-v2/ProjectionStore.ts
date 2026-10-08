@@ -332,6 +332,15 @@ export interface ShellSnapshotOptions {
   readonly unsettledOnly?: boolean;
 }
 
+export interface ProjectionJobsPageOptions {
+  readonly beforeJob?: { readonly ordinal: number; readonly itemId: TurnItemId } | undefined;
+  readonly limit: number;
+}
+export interface ProjectionJobsPage {
+  readonly items: ReadonlyArray<OrchestrationV2TurnItem>;
+  readonly hasMore: boolean;
+}
+
 export interface ProjectionStoreV2Shape {
   readonly searchThreadStream: (
     input: OrchestrationV2SearchThreadInput,
@@ -339,6 +348,10 @@ export interface ProjectionStoreV2Shape {
   readonly searchThread: (
     input: OrchestrationV2SearchThreadInput,
   ) => Effect.Effect<OrchestrationV2SearchThreadResult, ProjectionStoreV2Error>;
+  readonly getJobsPage: (
+    threadId: ThreadId,
+    options: ProjectionJobsPageOptions,
+  ) => Effect.Effect<ProjectionJobsPage, ProjectionStoreV2Error>;
   readonly getThreadAttachmentIds: (
     threadId: ThreadId,
   ) => Effect.Effect<ReadonlyArray<string>, ProjectionStoreV2Error>;
@@ -2902,7 +2915,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   WHERE job.thread_id = ${threadId}
                     AND ${window.anchorItemId ?? null} IS NULL
                     AND job.type = 'system_notice'
-                    AND json_extract(job.payload_json, '$.job.id') IS NOT NULL
+                    AND job.status = 'running'
+                    AND json_extract(job.payload_json, '$.job.state') IN ('running', 'stopping')
                   UNION
                   SELECT latest.ordinal, latest.turn_item_id
                   FROM (
@@ -2918,7 +2932,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 )
                 -- CROSS JOIN keeps the sorted IDs as the outer loop, so SQLite
                 -- skips sorting again once the payloads are attached.
-                SELECT item.payload_json
+                SELECT CASE
+                  WHEN json_extract(item.payload_json, '$.job.id') IS NOT NULL THEN
+                    json_set(item.payload_json, '$.job.output', '', '$.job.outputOmitted', json('true'))
+                  ELSE item.payload_json
+                END AS payload_json
                 FROM retained
                 CROSS JOIN orchestration_v2_projection_turn_items AS item
                   ON item.turn_item_id = retained.turn_item_id
@@ -5057,6 +5075,38 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         )
         .pipe(Effect.mapError(controlReadError(threadId)));
 
+    const getJobsPage: ProjectionStoreV2Shape["getJobsPage"] = (threadId, options) =>
+      sql
+        .withTransaction(
+          Effect.gen(function* () {
+            yield* requireThread(threadId);
+            // Read only one summary page. Outputs stay in the existing turn item.
+            const rows = yield* sql<PayloadRow>`SELECT
+            json_set(payload_json, '$.job.output', '', '$.job.outputOmitted', json('true')) AS payload_json
+            FROM orchestration_v2_projection_turn_items
+            WHERE thread_id = ${threadId} AND type = 'system_notice'
+              AND json_extract(payload_json, '$.job.id') IS NOT NULL
+              AND (${options.beforeJob?.ordinal ?? null} IS NULL
+                OR ordinal < ${options.beforeJob?.ordinal ?? null}
+                OR (ordinal = ${options.beforeJob?.ordinal ?? null}
+                  AND turn_item_id < ${options.beforeJob?.itemId ?? null}))
+            ORDER BY ordinal DESC, turn_item_id DESC
+            LIMIT ${options.limit + 1}`;
+            const items = yield* decodeRows(
+              decodeTurnItemPayload,
+              threadId,
+            )(rows.slice(0, options.limit));
+            return { items, hasMore: rows.length > options.limit };
+          }),
+        )
+        .pipe(
+          Effect.mapError((cause) =>
+            isProjectionStoreThreadNotFoundError(cause) || isProjectionStoreReadError(cause)
+              ? cause
+              : new ProjectionStoreReadError({ threadId, cause }),
+          ),
+        );
+
     const getTimelinePage: ProjectionStoreV2Shape["getTimelinePage"] = (threadId, options) =>
       sql
         .withTransaction(
@@ -5994,6 +6044,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getUnreadableThreadIds,
       getThreadSnapshot,
       getThreadSnapshotWindow,
+      getJobsPage,
       getTimelinePage,
       getThreadHistoryPage,
       searchThread,
@@ -6620,6 +6671,25 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
               });
             }),
           ),
+        ),
+      getJobsPage: (threadId, options) =>
+        service.getThreadProjection(threadId).pipe(
+          Effect.map((projection) => {
+            const jobs = projection.turnItems
+              .filter((item) => item.type === "system_notice" && item.job !== undefined)
+              .sort((a, b) => b.ordinal - a.ordinal || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
+            const before = options.beforeJob;
+            const matching = jobs.filter(
+              (item) =>
+                before === undefined ||
+                item.ordinal < before.ordinal ||
+                (item.ordinal === before.ordinal && item.id < before.itemId),
+            );
+            return {
+              items: matching.slice(0, options.limit).map(projectTurnItemForWire),
+              hasMore: matching.length > options.limit,
+            };
+          }),
         ),
       getTimelinePage: (threadId, options) =>
         service.getThreadProjection(threadId).pipe(

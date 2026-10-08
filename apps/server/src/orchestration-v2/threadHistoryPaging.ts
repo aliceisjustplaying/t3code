@@ -337,15 +337,15 @@ function isLocalProjectedRow(
  * later history page that introduces the matching result still has the request
  * available for live attempt/run reducers. Heads-ups have their own durable
  * environment query and do not expand the transcript window.
- * Jobs (including finished jobs and parent copies of child jobs) back the jobs
- * panel independently of transcript paging. Their schema-bounded output is
- * charged to the same control reserve; excess control state is reported rather
- * than silently dropping a live Stop target.
+ * Only live jobs are control dependencies (Stop targets). Finished jobs have
+ * their own summary page over persisted turn items and do not expand history.
  */
 function isRetainedControlItem(item: OrchestrationV2TurnItem): boolean {
   return (
     item.type === "run_interrupt_request" ||
-    (item.type === "system_notice" && item.job !== undefined)
+    (item.type === "system_notice" &&
+      item.status === "running" &&
+      (item.job?.state === "running" || item.job?.state === "stopping"))
   );
 }
 

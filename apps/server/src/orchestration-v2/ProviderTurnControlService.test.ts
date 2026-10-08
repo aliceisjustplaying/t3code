@@ -228,6 +228,7 @@ it.effect(
           searchThread: () => Effect.die("unused"),
           searchThreadStream: () => Stream.empty,
           getThreadHistoryPage: () => Effect.die("unused"),
+          getJobsPage: () => Effect.die("Unused jobs read"),
           getTimelinePage: () => Effect.die("Unused timeline read"),
           getMessageCount: () => Effect.die("unused message count"),
           getNextTurnItemOrdinal: () => Effect.die("unused ordinal read"),
@@ -268,6 +269,7 @@ it.effect(
         ProviderSessionManager.ProviderSessionManagerV2.of({
           shutdown: Effect.void,
           open: () => Effect.die("unused open"),
+          isThreadLoaded: () => Effect.die("unused isThreadLoaded"),
           get: (providerSessionId) =>
             Effect.succeed(
               providerSessionId === oldSessionId ? Option.some(runtime) : Option.none(),

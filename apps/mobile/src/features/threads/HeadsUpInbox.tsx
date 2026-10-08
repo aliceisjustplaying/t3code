@@ -90,7 +90,7 @@ export function useHeadsUpInbox(
                   Current environment · All projects and threads
                 </Text>
                 <InboxPages
-                  key={environmentId}
+                  key={`${environmentId}:${threadId}`}
                   environmentId={environmentId}
                   threadId={threadId}
                   connected={connected}
@@ -206,9 +206,8 @@ function InboxPages({
         environmentId,
         input: { threadId: entry.threadId, turnItemId: entry.turnItemId, resolution: "dismiss" },
       });
-      if (!mounted.current) return;
       if (result._tag !== "Success") {
-        setActionError("The notice could not be updated. Try again.");
+        if (mounted.current) setActionError("The notice could not be updated. Try again.");
         return;
       }
       const draftKey = scopedThreadKey(environmentId, entry.targetThreadId);
@@ -216,6 +215,8 @@ function InboxPages({
         draftKey,
         appendHeadsUpFollowUp(getComposerDraftSnapshot(draftKey).text, entry),
       );
+      // Closing the inbox must not discard a draft for an already-dismissed notice.
+      if (!mounted.current) return;
       onDraftReady();
       onClose();
       if (threadId !== entry.targetThreadId)

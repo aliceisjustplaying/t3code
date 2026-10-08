@@ -1777,6 +1777,9 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       yield* emit({
         type: "provider_thread.updated",
         driver,
+        ...(turn.providerTurn.runAttemptId === null
+          ? {}
+          : { runAttemptId: turn.providerTurn.runAttemptId }),
         providerThread: state.providerThread,
       });
       const anyActive = [...threads.values()].some(
@@ -3355,6 +3358,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         yield* emit({
           type: "provider_thread.updated",
           driver,
+          runAttemptId: turnInput.attemptId,
           providerThread: state.providerThread,
         });
         yield* setSessionStatus("running", null);

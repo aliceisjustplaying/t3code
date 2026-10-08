@@ -1355,6 +1355,8 @@ export const OrchestrationV2Job = Schema.Struct({
   exitCode: Schema.NullOr(Schema.Number),
   signal: Schema.NullOr(Schema.String),
   output: Schema.String.check(Schema.isMaxLength(16000)),
+  /** Output is fetched only while the job details are open. */
+  outputOmitted: Schema.optional(Schema.Boolean),
   providerSessionId: ProviderSessionId,
   sourceThreadId: Schema.optional(ThreadId),
   sourceTitle: Schema.optional(Schema.String),
@@ -3239,6 +3241,7 @@ export const ORCHESTRATION_V2_WS_METHODS = {
   getThreadProjection: "orchestration.getThreadProjection",
   getWorkflowScript: "orchestration.getWorkflowScript",
   getTurnItem: "orchestration.getTurnItem",
+  getJobsPage: "orchestration.getJobsPage",
   launchThread: "orchestration.launchThread",
   subscribeArchivedShell: "orchestration.subscribeArchivedShell",
   subscribeShell: "orchestration.subscribeShell",
@@ -3562,6 +3565,24 @@ export const OrchestrationV2GetTurnItemResult = Schema.Struct({
 });
 export type OrchestrationV2GetTurnItemResult = typeof OrchestrationV2GetTurnItemResult.Type;
 
+/** Keyset over persisted job notices, including forwarded child copies. */
+export const OrchestrationV2JobsCursor = Schema.Struct({
+  ordinal: NonNegativeInt,
+  itemId: TurnItemId,
+});
+export const OrchestrationV2GetJobsPageInput = Schema.Struct({
+  threadId: ThreadId,
+  cursor: Schema.optional(Schema.NullOr(OrchestrationV2JobsCursor)),
+  /** Client cache revision; not a persistence filter. */
+  revision: Schema.optional(Schema.String),
+});
+export type OrchestrationV2GetJobsPageInput = typeof OrchestrationV2GetJobsPageInput.Type;
+export const OrchestrationV2GetJobsPageResult = Schema.Struct({
+  items: Schema.Array(OrchestrationV2TurnItem),
+  nextCursor: Schema.NullOr(OrchestrationV2JobsCursor),
+});
+export type OrchestrationV2GetJobsPageResult = typeof OrchestrationV2GetJobsPageResult.Type;
+
 const WORKFLOW_SCRIPT_ERROR_MESSAGES = {
   "invalid-path": "Workflow scripts must be absolute .js paths.",
   "root-unavailable": "Script root unavailable.",
@@ -3683,6 +3704,10 @@ export const OrchestrationV2RpcSchemas = {
   getTurnItem: {
     input: OrchestrationV2GetTurnItemInput,
     output: OrchestrationV2GetTurnItemResult,
+  },
+  getJobsPage: {
+    input: OrchestrationV2GetJobsPageInput,
+    output: OrchestrationV2GetJobsPageResult,
   },
   launchThread: {
     input: OrchestrationV2ThreadLaunchInput,

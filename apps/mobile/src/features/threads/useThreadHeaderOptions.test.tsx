@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import type { VcsStatusResult } from "@t3tools/contracts";
+import { EnvironmentId, ThreadId, type VcsStatusResult } from "@t3tools/contracts";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
@@ -32,7 +32,12 @@ vi.mock("@react-navigation/native", () => {
   };
 });
 vi.mock("../../state/session", () => ({ useEnvironmentScope: () => true }));
-vi.mock("react-native", () => ({ Alert: { alert: () => {} }, Linking: {}, Platform: {} }));
+vi.mock("react-native", () => ({
+  Alert: { alert: () => {} },
+  Linking: {},
+  Platform: {},
+  View: "div",
+}));
 vi.mock("../layout/AdaptiveWorkspaceLayout", () => ({
   useAdaptiveWorkspaceLayout: () => ({
     layout: { usesSplitView: false },
@@ -47,6 +52,10 @@ vi.mock("../layout/native-mail-search-toolbar", () => ({
 }));
 vi.mock("../settings/appearance/AppearancePreferencesProvider", () => ({
   useAppearancePreferences: () => ({ themeVariables: {} }),
+}));
+
+vi.mock("./HeadsUpInbox", () => ({
+  useHeadsUpInbox: () => ({ button: null, modal: null, revision: "inbox" }),
 }));
 
 import { ThreadHeader } from "./ThreadHeader";
@@ -80,6 +89,9 @@ function status(
 function Header(props: { readonly gitStatus: VcsStatusResult | null; readonly title?: string }) {
   return (
     <ThreadHeader
+      environmentId={EnvironmentId.make("environment-1")}
+      threadId={ThreadId.make("thread-1")}
+      onDraftReady={() => {}}
       title={props.title ?? "Thread"}
       subtitle=""
       headerColor="#000"

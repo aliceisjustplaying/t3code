@@ -51,6 +51,12 @@ export function createOrchestrationEnvironmentAtoms<R, E>(
       staleTimeMs: 60_000,
       idleTtlMs: 60_000,
     }),
+    jobsPage: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:orchestration:jobs-page",
+      tag: ORCHESTRATION_V2_WS_METHODS.getJobsPage,
+      staleTimeMs: 0,
+      idleTtlMs: 0,
+    }),
     fullThreadDiff: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:orchestration:full-thread-diff",
       tag: ORCHESTRATION_V2_WS_METHODS.getFullThreadDiff,

@@ -93,6 +93,11 @@ export const ProviderAdapterV2Event = Schema.Union([
     type: Schema.Literal("provider_thread.updated"),
     driver: ProviderDriverKind,
     providerThread: OrchestrationV2ProviderThread,
+    /**
+     * Root-turn snapshots carry the originating attempt, never the current run owner.
+     * Session/lifecycle updates and runless child threads omit it.
+     */
+    runAttemptId: Schema.optional(RunAttemptId),
   }),
   Schema.Struct({
     type: Schema.Literal("provider_turn.updated"),
@@ -241,6 +246,8 @@ export class ProviderAdapterRollbackThreadError extends Schema.TaggedError<Provi
     driver: ProviderDriverKind,
     providerThreadId: ProviderThreadId,
     checkpointId: Schema.optional(CheckpointId),
+    /** An explicit native veto, before any destructive lifecycle work. */
+    nativeSessionUnchanged: Schema.optional(Schema.Literal(true)),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {

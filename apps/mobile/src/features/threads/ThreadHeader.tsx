@@ -88,22 +88,28 @@ export function ThreadHeader(
         subtitle={props.subtitle}
         sidebar={native.sidebar}
         options={native.options}
-        optionsVersion={[native.optionsVersion, inbox.revision]}
-        trailing={<View style={{ flexDirection: "row", alignItems: "center" }}>
-          {Platform.OS === "android" ? inbox.button : null}
-          {props.fileInspectorSupported && props.hasThreadCwd ? (
-            <ScreenHeaderButton
-              accessibilityLabel={
-                props.inspectorMode !== null && panes.auxiliaryPaneVisible
-                  ? "Hide inspector"
-                  : "Show inspector"
-              }
-              icon="sidebar.right"
-              selected={props.inspectorMode !== null && panes.auxiliaryPaneVisible}
-              onPress={props.onToggleInspector}
-            />
-          ) : null}
-        </View>}
+        optionsVersion={[
+          native.optionsVersion,
+          inbox.revision,
+          JSON.stringify(props.gitControls.jobsMenu),
+        ]}
+        trailing={
+          <View style={{ flexDirection: "row", alignItems: "center" }}>
+            {Platform.OS === "android" ? inbox.button : null}
+            {props.fileInspectorSupported && props.hasThreadCwd ? (
+              <ScreenHeaderButton
+                accessibilityLabel={
+                  props.inspectorMode !== null && panes.auxiliaryPaneVisible
+                    ? "Hide inspector"
+                    : "Show inspector"
+                }
+                icon="sidebar.right"
+                selected={props.inspectorMode !== null && panes.auxiliaryPaneVisible}
+                onPress={props.onToggleInspector}
+              />
+            ) : null}
+          </View>
+        }
         onBack={
           layout.usesSplitView
             ? undefined

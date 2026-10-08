@@ -1464,3 +1464,111 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
     }),
   );
 });
+
+it.layer(layerTest)("delegated completion after background settlement", (it) => {
+  it.effect("automatically delivers a settled child's result once its last job roster clears", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:roster-parent");
+      const projectId = ProjectId.make("project:roster-parent");
+      const runId = RunId.make("run:roster-parent");
+      const rootNodeId = NodeId.make("node:roster-parent-root");
+      yield* seedParentWithTerminalTask({
+        threadId,
+        projectId,
+        runId,
+        rootNodeId,
+        taskId: NodeId.make("node:roster-parent-settled"),
+        deliveryState: "delivered",
+        now,
+      });
+      const child = yield* seedRestartCancelledChild({
+        parentThreadId: threadId,
+        projectId,
+        parentRunId: runId,
+        rootNodeId,
+        name: "roster-child",
+        completionWake: "always",
+        continuationPending: false,
+        runStatus: "completed",
+        now,
+      });
+      const providerThread = {
+        id: ProviderThreadId.make("provider-thread:roster-child"),
+        driver,
+        providerInstanceId: modelSelection.instanceId,
+        providerSessionId: null,
+        appThreadId: child.childThreadId,
+        ownerNodeId: null,
+        nativeThreadRef: null,
+        nativeConversationHeadRef: null,
+        status: "idle" as const,
+        firstRunOrdinal: 1,
+        lastRunOrdinal: 1,
+        handoffIds: [],
+        forkedFrom: null,
+        createdAt: now,
+        updatedAt: now,
+        pendingBackgroundTasks: [
+          { taskId: "pi:background-work", kind: "background_task" as const },
+        ],
+      };
+      const rosterEvent = (clear: boolean) => ({
+        id: EventId.make("event:roster-child:" + (clear ? "clear" : "pending")),
+        type: "provider-thread.updated" as const,
+        threadId: child.childThreadId,
+        occurredAt: now,
+        payload: {
+          ...providerThread,
+          pendingBackgroundTasks: clear ? [] : providerThread.pendingBackgroundTasks,
+        },
+      });
+      yield* eventSink.write({ events: [rosterEvent(false)] });
+      yield* orchestrator.recoverDelegatedTask(child.childThreadId, child.childRunId);
+      const pending = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(pending.subagents.find((task) => task.id === child.taskId)?.status, "running");
+      const afterSequence = yield* eventSink.latestSequence();
+      yield* eventSink.write({ events: [rosterEvent(true)] });
+      // Await the committed result, not a status read that itself finalizes the task.
+      yield* eventSink.stream({ threadId, afterSequence, eventType: "subagent.updated" }).pipe(
+        Stream.filter(
+          (stored) =>
+            stored.event.type === "subagent.updated" &&
+            stored.event.payload.id === child.taskId &&
+            stored.event.payload.status === "completed",
+        ),
+        Stream.take(1),
+        Stream.runDrain,
+      );
+      const completed = yield* orchestrator.getThreadProjection(threadId);
+      const task = completed.subagents.find((task) => task.id === child.taskId);
+      assert.equal(task?.status, "completed");
+      assert.equal(task?.completionDelivery?.state, "claimed");
+      assert.isString(task?.result);
+      const transfers = completed.contextTransfers.filter(
+        (transfer) =>
+          transfer.type === "subagent_result" && transfer.sourceThreadId === child.childThreadId,
+      );
+      assert.equal(transfers.length, 1);
+      yield* eventSink.write({
+        events: [{ ...rosterEvent(true), id: EventId.make("event:roster-child:clear-again") }],
+      });
+      yield* orchestrator.recoverDelegatedTask(child.childThreadId, child.childRunId);
+      const repeated = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(
+        repeated.contextTransfers.filter(
+          (transfer) =>
+            transfer.type === "subagent_result" && transfer.sourceThreadId === child.childThreadId,
+        ).length,
+        1,
+      );
+      assert.equal(
+        (yield* orchestrator.getThreadProjection(child.childThreadId)).runs.length,
+        1,
+        "roster settlement must not synthesize another child run",
+      );
+    }),
+  );
+});

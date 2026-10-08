@@ -24,6 +24,7 @@ const ui = vi.hoisted(() => ({
   navigate: vi.fn(),
   draftReady: vi.fn(),
   threadId: "current",
+  environmentId: "environment",
   command: vi.fn(async (_input: unknown) => ({ _tag: "Success" })),
 }));
 const storage = vi.hoisted(() => ({
@@ -225,7 +226,11 @@ const draft = {
 };
 let root: Root;
 function Probe() {
-  const inbox = useHeadsUpInbox(environmentId, ThreadId.make(ui.threadId), ui.draftReady);
+  const inbox = useHeadsUpInbox(
+    EnvironmentId.make(ui.environmentId),
+    ThreadId.make(ui.threadId),
+    ui.draftReady,
+  );
   return (
     <>
       {inbox.button}
@@ -252,6 +257,7 @@ beforeEach(() => {
   ui.navigate.mockClear();
   ui.draftReady.mockReset();
   ui.threadId = "current";
+  ui.environmentId = environmentId;
   ui.command.mockReset().mockResolvedValue({ _tag: "Success" });
   const document = { nodeType: 9, addEventListener() {}, removeEventListener() {} };
   const container = {
@@ -301,6 +307,91 @@ it("Collapsed Ask waits for disk hydration and appends to the latest draft witho
     input: { threadId: entry.threadId, turnItemId: entry.turnItemId, resolution: "dismiss" },
   });
 });
+
+it.each(["Success", "Failure"] as const)(
+  "Ask completing with %s after closing writes only the captured hydrated draft on success and leaves the reopened inbox alone",
+  async (resultTag) => {
+    await act(async () => waitForComposerDraftsLoaded());
+    await openNotice();
+    const saving = Promise.withResolvers<{ _tag: string }>();
+    ui.command.mockReturnValueOnce(saving.promise);
+    await act(async () => {
+      ui.ask!();
+    });
+    expect(ui.command).toHaveBeenCalledWith({
+      environmentId,
+      input: { threadId: entry.threadId, turnItemId: entry.turnItemId, resolution: "dismiss" },
+    });
+    await act(async () => ui.presses.get("Back to chat")!());
+    ui.environmentId = "other-environment";
+    await openNotice();
+    setComposerDraftText(key, `${draft.text}\nEdited while saving`);
+    const otherKey = "other-environment:target";
+    setComposerDraftText(otherKey, "Other environment draft");
+    await act(async () => saving.resolve({ _tag: resultTag }));
+    const capturedDraft = getComposerDraftSnapshot(key);
+    expect(capturedDraft.attachments).toEqual(draft.attachments);
+    expect(capturedDraft.context).toEqual(draft.context);
+    if (resultTag === "Success") {
+      expect(capturedDraft.text).toContain(
+        `${draft.text}\nEdited while saving\n\nHere is a note offered by a side agent:`,
+      );
+      expect(capturedDraft.text).toContain("Check the cache.");
+      expect(capturedDraft.text.match(/Here is a note/g)).toHaveLength(1);
+    } else {
+      expect(capturedDraft.text).toBe(`${draft.text}\nEdited while saving`);
+    }
+    expect(getComposerDraftSnapshot(otherKey).text).toBe("Other environment draft");
+    expect(ui.visible).toBe(true);
+    expect(ui.askDisabled).toBe(false);
+    expect(ui.navigate).not.toHaveBeenCalled();
+    expect(ui.draftReady).not.toHaveBeenCalled();
+    expect(ui.errors).toEqual([]);
+  },
+);
+
+it.each(["Success", "Failure"] as const)(
+  "Ask completing with %s after same-environment thread navigation preserves the new screen",
+  async (resultTag) => {
+    await act(async () => waitForComposerDraftsLoaded());
+    await openNotice();
+    const saving = Promise.withResolvers<{ _tag: string }>();
+    ui.command.mockReturnValueOnce(saving.promise);
+    await act(async () => ui.ask!());
+    expect(ui.command).toHaveBeenCalledWith({
+      environmentId,
+      input: { threadId: entry.threadId, turnItemId: entry.turnItemId, resolution: "dismiss" },
+    });
+    let selectedJob: string | null = "current-screen-job";
+    ui.draftReady.mockImplementation(() => {
+      selectedJob = null;
+    });
+    ui.threadId = "current-b";
+    // Re-render the retained hook without closing its modal first.
+    await act(async () => root.render(createElement(Probe)));
+    expect(ui.visible).toBe(true);
+    const currentKey = "environment:current-b";
+    setComposerDraftText(currentKey, "Current screen draft");
+    setComposerDraftText(key, `${draft.text}\nEdited while saving`);
+    await act(async () => saving.resolve({ _tag: resultTag }));
+    const capturedDraft = getComposerDraftSnapshot(key);
+    expect(capturedDraft.attachments).toEqual(draft.attachments);
+    expect(capturedDraft.context).toEqual(draft.context);
+    if (resultTag === "Success") {
+      expect(capturedDraft.text).toContain(`${draft.text}\nEdited while saving\n\nHere is a note`);
+      expect(capturedDraft.text.match(/Here is a note/g)).toHaveLength(1);
+    } else {
+      expect(capturedDraft.text).toBe(`${draft.text}\nEdited while saving`);
+    }
+    expect(getComposerDraftSnapshot(currentKey).text).toBe("Current screen draft");
+    expect(selectedJob).toBe("current-screen-job");
+    expect(ui.visible).toBe(true);
+    expect(ui.askDisabled).toBe(false);
+    expect(ui.navigate).not.toHaveBeenCalled();
+    expect(ui.draftReady).not.toHaveBeenCalled();
+    expect(ui.errors).toEqual([]);
+  },
+);
 
 it("Ask preserves edits after hydration and keeps the inbox open when hydration fails", async () => {
   const warning = vi.spyOn(console, "warn").mockImplementation(() => {});

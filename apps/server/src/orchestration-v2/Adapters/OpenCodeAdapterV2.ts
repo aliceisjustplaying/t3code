@@ -1128,6 +1128,7 @@ export function makeOpenCodeAdapterV2(
         const updateProviderThread = (
           state: OpenCodeThreadState,
           patch: Partial<OrchestrationV2ProviderThread>,
+          runAttemptId?: OrchestrationV2ProviderTurn["runAttemptId"],
         ) =>
           Effect.gen(function* () {
             const updatedAt = yield* DateTime.now;
@@ -1135,6 +1136,7 @@ export function makeOpenCodeAdapterV2(
             yield* emitProviderEvent({
               type: "provider_thread.updated",
               driver: OPENCODE_PROVIDER,
+              ...(runAttemptId == null ? {} : { runAttemptId }),
               providerThread: state.providerThread,
             });
           });
@@ -2076,13 +2078,17 @@ export function makeOpenCodeAdapterV2(
           }
           yield* emitProviderTurn(state, turn, status, completedAt);
           const threadDisposition = terminal?.threadDisposition ?? "reusable";
-          yield* updateProviderThread(state, {
-            status: turn.isRoot ? "active" : threadDisposition === "broken" ? "error" : "idle",
-            nativeConversationHeadRef:
-              turn.nativeUserMessageId === null
-                ? state.providerThread.nativeConversationHeadRef
-                : providerRef(turn.nativeUserMessageId, "weak"),
-          });
+          yield* updateProviderThread(
+            state,
+            {
+              status: turn.isRoot ? "active" : threadDisposition === "broken" ? "error" : "idle",
+              nativeConversationHeadRef:
+                turn.nativeUserMessageId === null
+                  ? state.providerThread.nativeConversationHeadRef
+                  : providerRef(turn.nativeUserMessageId, "weak"),
+            },
+            turn.runAttemptId,
+          );
           state.activeTurn = null;
           if (!turn.isRoot) {
             yield* emitProviderEvent({
@@ -3229,11 +3235,15 @@ export function makeOpenCodeAdapterV2(
               state.activeTurn = turn;
               state.providerTurns.set(String(providerTurnId), providerTurn);
               yield* emitProviderTurn(state, turn, "running", null);
-              yield* updateProviderThread(state, {
-                status: "active",
-                firstRunOrdinal: state.providerThread.firstRunOrdinal ?? turnInput.runOrdinal,
-                lastRunOrdinal: turnInput.runOrdinal,
-              });
+              yield* updateProviderThread(
+                state,
+                {
+                  status: "active",
+                  firstRunOrdinal: state.providerThread.firstRunOrdinal ?? turnInput.runOrdinal,
+                  lastRunOrdinal: turnInput.runOrdinal,
+                },
+                turnInput.attemptId,
+              );
               yield* updateProviderSession("running", null);
               if (isCompaction) {
                 yield* sdkCall(

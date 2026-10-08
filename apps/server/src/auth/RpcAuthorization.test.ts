@@ -16,6 +16,7 @@ import {
   AuthTerminalReadScope,
   AuthTerminalOperateScope,
   WS_METHODS,
+  ORCHESTRATION_V2_WS_METHODS,
   WsRpcGroup,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
@@ -399,6 +400,42 @@ it.effect("separates host file URLs from readable attachment URLs", () =>
         requiredPermission: AuthFilesystemReadScope,
       });
     }
+    expect(handled).toBe(1);
+  }).pipe(Effect.scoped),
+);
+
+it.effect("job summary pages require read scope before returning persisted thread data", () =>
+  Effect.gen(function* () {
+    const tag = ORCHESTRATION_V2_WS_METHODS.getJobsPage;
+    const group = WsRpcGroup.omit(
+      ...[...WsRpcGroup.requests.keys()].filter(
+        (method): method is Exclude<keyof typeof RPC_REQUIRED_SCOPES, typeof tag> => method !== tag,
+      ),
+    );
+    let handled = 0;
+    const handler = group.toLayerHandler(tag, () =>
+      Effect.sync(() => {
+        handled += 1;
+        return { items: [], nextCursor: null };
+      }),
+    );
+    const denied = yield* RpcTest.makeClient(group).pipe(
+      Effect.provide(Layer.merge(handler, RpcAuthorization.layer([AuthOrchestrationOperateScope]))),
+    );
+    expect(yield* denied[tag]({ threadId: ThreadId.make("jobs") }).pipe(Effect.flip)).toMatchObject(
+      {
+        _tag: "EnvironmentAuthorizationError",
+        requiredPermission: AuthOrchestrationReadScope,
+      },
+    );
+    expect(handled).toBe(0);
+    const readable = yield* RpcTest.makeClient(group).pipe(
+      Effect.provide(Layer.merge(handler, RpcAuthorization.layer([AuthOrchestrationReadScope]))),
+    );
+    expect(yield* readable[tag]({ threadId: ThreadId.make("jobs") })).toEqual({
+      items: [],
+      nextCursor: null,
+    });
     expect(handled).toBe(1);
   }).pipe(Effect.scoped),
 );

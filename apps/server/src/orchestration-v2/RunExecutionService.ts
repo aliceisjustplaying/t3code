@@ -568,6 +568,7 @@ export const layer: Layer.Layer<
       readonly openRunOwnedSubagents?: OpenRunOwnedSubagentProjection;
       readonly terminal: ProviderTerminalEvent;
       readonly failureItemPersisted: boolean;
+      readonly providerThreadPersistedBySession?: boolean;
       readonly refreshAfterTurn: Effect.Effect<void>;
       readonly writeIfRunCurrent?: {
         readonly activeAttemptId: RunAttemptId;
@@ -769,14 +770,18 @@ export const layer: Layer.Layer<
               occurredAt: completedAt,
               payload: finalizedRootNode,
             },
-            {
-              id: providerThreadEventId,
-              type: "provider-thread.updated",
-              threadId: input.run.threadId,
-              providerInstanceId: input.run.providerInstanceId,
-              occurredAt: completedAt,
-              payload: finalizedProviderThread,
-            },
+            ...(input.providerThreadPersistedBySession === true
+              ? []
+              : [
+                  {
+                    id: providerThreadEventId,
+                    type: "provider-thread.updated" as const,
+                    threadId: input.run.threadId,
+                    providerInstanceId: input.run.providerInstanceId,
+                    occurredAt: completedAt,
+                    payload: finalizedProviderThread,
+                  },
+                ]),
           ],
         } satisfies Parameters<typeof eventSink.writeWithEffects>[0];
         if (input.writeIfRunCurrent !== undefined) {
@@ -992,6 +997,9 @@ export const layer: Layer.Layer<
                 openRunOwnedSubagents: openSubagents,
                 terminal,
                 failureItemPersisted: terminal.status === "failed",
+                providerThreadPersistedBySession:
+                  "persistsProviderThreadEvents" in input.session &&
+                  input.session.persistsProviderThreadEvents === true,
                 refreshAfterTurn,
               }).pipe(
                 Effect.mapError(
@@ -1158,8 +1166,16 @@ export const layer: Layer.Layer<
             if (backgroundItems.size > 0) {
               return false;
             }
-            // Owner loss means do not hold the stream open solely for the
-            // roster probe; once background sets are empty, release.
+            // The session pump owns durable root rosters, including their clears.
+            // Managed runs retain only their owned children/items, never a roster
+            // that a later turn on the same native thread may keep nonempty.
+            if (
+              "persistsProviderThreadEvents" in input.session &&
+              input.session.persistsProviderThreadEvents === true
+            ) {
+              return true;
+            }
+            // Unmanaged roots still need their roster subscription until owner loss.
             if (yield* Ref.get(providerThreadOwnerLost)) {
               return true;
             }
@@ -1189,11 +1205,20 @@ export const layer: Layer.Layer<
             Stream.tap((event) =>
               Effect.gen(function* () {
                 let storedEventCount = 0;
+                // Managed roots observe snapshots already committed by the pump.
+                // Native child threads and unmanaged adapters still ingest here.
+                const sessionOwnedThreadUpdate =
+                  "persistsProviderThreadEvents" in input.session &&
+                  input.session.persistsProviderThreadEvents === true &&
+                  event.type === "provider_thread.updated" &&
+                  event.providerThread.id === input.providerThread.id &&
+                  event.providerThread.appThreadId === input.run.threadId &&
+                  event.providerThread.providerSessionId === input.providerSessionId;
                 const deliveredEvent = filterAssistantEvent(
                   event,
                   DateTime.toEpochMillis(yield* DateTime.now),
                 );
-                if (deliveredEvent) {
+                if (deliveredEvent && !sessionOwnedThreadUpdate) {
                   // Root provider_thread.updated always uses an ownership gate:
                   // pre-terminal writeIfRunCurrent (attempt still running), or
                   // post-terminal writeIfProviderThreadOwner so late roster
@@ -1246,7 +1271,10 @@ export const layer: Layer.Layer<
                   }
                 }
                 if (event.type === "provider_thread.updated") {
-                  if (event.providerThread.id === input.providerThread.id && storedEventCount > 0) {
+                  if (
+                    event.providerThread.id === input.providerThread.id &&
+                    (sessionOwnedThreadUpdate || storedEventCount > 0)
+                  ) {
                     yield* Ref.set(latestProviderThread, event.providerThread);
                   }
                 }

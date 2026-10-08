@@ -57,7 +57,7 @@ import {
   RuntimeMode,
   ThreadLinkedPullRequest,
   ThreadId,
-  type TurnItemId,
+  TurnItemId,
 } from "@t3tools/contracts";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
 import {
@@ -100,6 +100,8 @@ import {
   threadShellFromProjection,
   ProjectionStoreV2,
   type ProjectionRecordField,
+  type ProjectionJobsPage,
+  type ProjectionJobsPageOptions,
   type ProjectionTimelinePage,
   type ProjectionTimelinePageOptions,
   type ProjectionRecordFilter,
@@ -298,6 +300,10 @@ export interface OrchestratorV2Shape {
     throughEntryId?: string,
     conversationOnly?: boolean,
   ) => Effect.Effect<OrchestrationV2ThreadHistoryPage, OrchestratorV2Error>;
+  readonly getJobsPage: (
+    threadId: ThreadId,
+    options: ProjectionJobsPageOptions,
+  ) => Effect.Effect<ProjectionJobsPage, OrchestratorProjectionError>;
   readonly getTimelinePage: (
     threadId: ThreadId,
     options: ProjectionTimelinePageOptions,
@@ -7296,10 +7302,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
   ) =>
     Effect.gen(function* () {
-      const projection = yield* loadProjectionForCommand(command, ["turnItems"], {
-        turnItemTypes: ["system_notice"],
-      });
-      const item = projection.turnItems.find((candidate) => candidate.id === command.turnItemId);
+      const item = yield* projectionStore
+        .getTurnItem({
+          threadId: command.threadId,
+          itemId: command.turnItemId,
+        })
+        .pipe(Effect.mapError(() => new OrchestratorProjectionError({ threadId: command.threadId })));
       if (
         item?.type !== "system_notice" ||
         !item.job ||
@@ -7315,8 +7323,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
       const job = item.job;
       const now = yield* DateTime.now;
-      // Commit the accepted request without claiming the process stopped. Only
-      // the owning runtime's next snapshot can change the observed job state.
+      // Record intent in a separate item: provider ingestion may complete the
+      // job between planning and commit. Never write the observed job back.
       yield* emit(
         events,
         command,
@@ -7324,7 +7332,28 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         type: "turn-item.updated",
         threadId: command.threadId,
         occurredAt: now,
-        payload: { ...item, updatedAt: now },
+        payload: {
+          id: TurnItemId.make("job-stop:" + command.commandId),
+          threadId: command.threadId,
+          runId: null,
+          nodeId: null,
+          providerThreadId: item.providerThreadId,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: item.id,
+          ordinal: yield* projectionStore
+            .getNextTurnItemOrdinal(command.threadId)
+            .pipe(
+              Effect.mapError(() => new OrchestratorProjectionError({ threadId: command.threadId })),
+            ),
+          status: "completed",
+          title: "Job stop requested",
+          startedAt: now,
+          completedAt: now,
+          updatedAt: now,
+          type: "system_notice",
+          message: "Stop requested for " + job.name,
+        },
       });
       yield* Ref.update(effects, (existing) => [
         ...existing,
@@ -7396,6 +7425,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const providerThreadId = item.providerThreadId;
       const noteId = item.headsUp.noteId;
       if (command.type === "thread.heads-up.read" || providerThreadId === null) return;
+      const source = yield* projectionStore.getThread(sourceThreadId).pipe(
+        Effect.catchTags({ ProjectionStoreThreadNotFoundError: () => Effect.succeed(undefined) }),
+        Effect.mapError(
+          (cause) => new OrchestratorProjectionError({ threadId: sourceThreadId, cause }),
+        ),
+      );
+      // Retained parent copies stay reviewable after their source is deleted.
+      if (source === undefined || source.deletedAt !== null) return;
       yield* Ref.update(effects, (existing) => [
         ...existing,
         {
@@ -10828,6 +10865,36 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       Effect.forkDetach,
     );
 
+  // A settled child can remain pending solely on its native background roster.
+  // Its last job stopping need not produce another run.updated event.
+  yield* eventSink
+    .stream({ afterSequence: terminalEventsAfterSequence, eventType: "provider-thread.updated" })
+    .pipe(
+      Stream.filter(
+        (stored) =>
+          stored.event.type === "provider-thread.updated" &&
+          stored.event.payload.pendingBackgroundTasks?.length === 0,
+      ),
+      Stream.runForEach((stored) =>
+        Effect.gen(function* () {
+          const threadId = stored.event.threadId;
+          const parentThreadId = yield* appOwnedSubagentParentThreadId(threadId);
+          if (parentThreadId !== undefined) {
+            yield* threadDispatch.withLock(parentThreadId, finalizeAppOwnedSubagent(threadId));
+          }
+        }).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("Failed to finalize V2 child after background roster cleared", {
+              threadId: stored.event.threadId,
+              sequence: stored.sequence,
+              cause,
+            }),
+          ),
+        ),
+      ),
+      Effect.forkDetach,
+    );
+
   // Settles child results and completion deliveries whose runs ended without
   // the listener above: before this boot, or in runtime reconciliation, which
   // it skips. Startup runs this after reconciliation and before the effect
@@ -10986,6 +11053,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       projectionStore
         .getThreadHistoryPage(threadId, cursor, throughEntryId, conversationOnly)
         .pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause }))),
+    getJobsPage: (threadId, options) =>
+      projectionStore
+        .getJobsPage(threadId, options)
+        .pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause }))),
     getTimelinePage: (threadId, options) =>
       projectionStore
         .getTimelinePage(threadId, options)
@@ -11125,6 +11196,7 @@ const layerUnavailable: Layer.Layer<OrchestratorV2> = Layer.succeed(
     searchThread: (input) =>
       Effect.fail(new OrchestratorProjectionError({ threadId: input.threadId })),
     getThreadHistoryPage: (threadId) => Effect.fail(new OrchestratorProjectionError({ threadId })),
+    getJobsPage: (threadId) => Effect.fail(new OrchestratorProjectionError({ threadId })),
     getTimelinePage: (threadId) => Effect.fail(new OrchestratorProjectionError({ threadId })),
     getMessageCount: (threadId) => Effect.fail(new OrchestratorProjectionError({ threadId })),
     getTurnItem: ({ threadId }) => Effect.fail(new OrchestratorProjectionError({ threadId })),

@@ -412,48 +412,59 @@ export const layerExecutor: Layer.Layer<
             const request = effect.request;
             // Restore the source session when needed; notes and feedback survive process release.
             return Effect.gen(function* () {
-              const { providerThreads } = yield* threads.getThreadRecords(effect.threadId, [
+              const projection = yield* threads.getThreadRecords(effect.threadId, [
                 "providerThreads",
+                "providerSessions",
               ]);
-              const providerThread = providerThreads.find(
+              if (projection.thread.deletedAt !== null) return;
+              const providerThread = projection.providerThreads.find(
                 (candidate) => candidate.id === request.providerThreadId,
               );
               if (providerThread?.providerSessionId == null) return;
               const session = yield* providerSessions.get(providerThread.providerSessionId);
               let runtime = Option.getOrUndefined(session);
               if (runtime?.answerHeadsUp === undefined && providerThread.driver !== "pi") return;
-              const projection = yield* threads.getThreadProjection(effect.threadId);
-              const previous = projection.providerSessions.find(
-                (candidate) => candidate.id === providerThread.providerSessionId,
-              );
-              const modelSelection = {
-                ...projection.thread.modelSelection,
-                instanceId: providerThread.providerInstanceId,
-                ...(previous?.model == null ? {} : { model: previous.model }),
-              };
-              const policy = yield* runtimePolicy.resolve({
-                thread: projection.thread,
-                modelSelection,
-              });
-              runtime ??= yield* providerSessions.open({
-                threadId: effect.threadId,
-                providerSessionId: providerThread.providerSessionId,
-                modelSelection,
-                runtimePolicy: policy,
-                ...(previous ? { resumeFromSession: previous } : {}),
-                ...(providerThread.nativeThreadRef?.nativeId
-                  ? { initialNativeThreadId: providerThread.nativeThreadRef.nativeId }
-                  : {}),
-              });
-              if (runtime.answerHeadsUp === undefined) return;
-              // The manager records successful loads, not merely open runtimes.
-              // A failed switch must be retried even while the process is cached.
-              yield* runtime.resumeThread({
-                threadId: effect.threadId,
-                modelSelection,
-                runtimePolicy: policy,
-                providerThread,
-              });
+              // Feedback belongs to the loaded native conversation, not next-turn
+              // configuration. Cached runtimes whose load failed still need restoration.
+              const loaded =
+                runtime !== undefined &&
+                (yield* providerSessions.isThreadLoaded({
+                  providerSessionId: providerThread.providerSessionId,
+                  threadId: effect.threadId,
+                  providerThread,
+                }));
+              if (!loaded) {
+                const previous = projection.providerSessions.find(
+                  (candidate) => candidate.id === providerThread.providerSessionId,
+                );
+                const modelSelection = {
+                  ...projection.thread.modelSelection,
+                  instanceId: providerThread.providerInstanceId,
+                  ...(previous?.model == null ? {} : { model: previous.model }),
+                };
+                const policy = yield* runtimePolicy.resolve({
+                  thread: projection.thread,
+                  modelSelection,
+                });
+                runtime ??= yield* providerSessions.open({
+                  threadId: effect.threadId,
+                  providerSessionId: providerThread.providerSessionId,
+                  modelSelection,
+                  runtimePolicy: policy,
+                  ...(previous ? { resumeFromSession: previous } : {}),
+                  ...(providerThread.nativeThreadRef?.nativeId
+                    ? { initialNativeThreadId: providerThread.nativeThreadRef.nativeId }
+                    : {}),
+                });
+                if (runtime.answerHeadsUp === undefined) return;
+                yield* runtime.resumeThread({
+                  threadId: effect.threadId,
+                  modelSelection,
+                  runtimePolicy: policy,
+                  providerThread,
+                });
+              }
+              if (runtime?.answerHeadsUp === undefined) return;
               yield* runtime.answerHeadsUp({
                 providerThread,
                 noteId: request.noteId,

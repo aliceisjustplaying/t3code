@@ -75,6 +75,13 @@ function summarizeDynamicValue(value: unknown): unknown {
 
 export function projectTurnItemForWire(item: OrchestrationV2TurnItem): OrchestrationV2TurnItem {
   switch (item.type) {
+    case "system_notice":
+      return item.job === undefined
+        ? item
+        : {
+            ...item,
+            job: { ...item.job, output: "", outputOmitted: true },
+          };
     case "handoff": {
       const { summary: _summary, ...projected } = item;
       return projected;
