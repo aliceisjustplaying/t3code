@@ -439,6 +439,39 @@ export const make = Effect.gen(function* () {
           });
         }
       }
+      // These runs settled before process loss, so the loop above cannot close
+      // their orphaned turns. Preserve their outcome and leave live runs to
+      // the existing process-loss reconciliation (including checkpoint replay).
+      for (const providerTurn of projection.providerTurns ?? []) {
+        if (providerTurn.status !== "pending" && providerTurn.status !== "running") continue;
+        const attempt = projection.attempts.find(
+          (candidate) => candidate.id === providerTurn.runAttemptId,
+        );
+        const run = projection.runs.find((candidate) => candidate.id === attempt?.runId);
+        if (
+          run === undefined ||
+          !["completed", "interrupted", "failed", "cancelled", "rolled_back"].includes(run.status)
+        )
+          continue;
+        const status = run.status === "rolled_back" ? "cancelled" : run.status;
+        if (
+          status !== "completed" &&
+          status !== "interrupted" &&
+          status !== "failed" &&
+          status !== "cancelled"
+        )
+          continue;
+        events.push({
+          id: yield* allocateEventId(),
+          type: "provider-turn.updated",
+          threadId: projection.thread.id,
+          runId: run.id,
+          nodeId: providerTurn.nodeId,
+          providerInstanceId: run.providerInstanceId,
+          occurredAt: now,
+          payload: { ...providerTurn, status, completedAt: run.completedAt ?? now },
+        });
+      }
       // Process loss also orphans background-capable turn items on already-
       // settled runs (e.g. post-settle Waiting work). Skip items already
       // cancelled above for recovered nonterminal runs to avoid duplicate

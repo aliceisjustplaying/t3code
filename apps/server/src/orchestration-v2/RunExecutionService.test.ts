@@ -45,16 +45,26 @@ import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import * as McpAppModelContext from "../mcpApps/McpAppModelContext.ts";
 import * as RunExecutionService from "./RunExecutionService.ts";
 import * as RunFinalizationService from "./RunFinalizationService.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as EventStore from "./EventStore.ts";
+import { seedProviderRun } from "./testkit/providerRun.ts";
 
 const driver = ProviderDriverKind.make("codex");
 
 const layerRunExecutionTest = RunExecutionService.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
+      Layer.mock(ProjectionStore.ProjectionStoreV2)({
+        getThreadRecords: () => Effect.succeed({ providerTurns: [] } as never),
+      }),
+      Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+        settleTurn: () => Effect.void,
+      }),
       McpAppModelContext.layerEmpty,
       Layer.mock(CheckpointService.CheckpointServiceV2)({ captureBaseline: () => Effect.void }),
       Layer.mock(EventSink.EventSinkV2)({}),
@@ -647,6 +657,12 @@ it.effect("passes the thread's MCP app context to the provider under a safe key"
       RunExecutionService.layer.pipe(
         Layer.provide(
           Layer.mergeAll(
+            Layer.mock(ProjectionStore.ProjectionStoreV2)({
+              getThreadRecords: () => Effect.succeed({ providerTurns: [] } as never),
+            }),
+            Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+              settleTurn: () => Effect.void,
+            }),
             Layer.mock(McpAppModelContext.McpAppModelContext)({
               forThread: () =>
                 Effect.succeed([
@@ -686,6 +702,12 @@ it.effect("fails the run when its ownership check cannot be read before calling 
     const layerTest = RunExecutionService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
+          Layer.mock(ProjectionStore.ProjectionStoreV2)({
+            getThreadRecords: () => Effect.succeed({ providerTurns: [] } as never),
+          }),
+          Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+            settleTurn: () => Effect.void,
+          }),
           McpAppModelContext.layerEmpty,
           Layer.mock(CheckpointService.CheckpointServiceV2)({ captureBaseline: () => Effect.void }),
           Layer.mock(EventSink.EventSinkV2)({
@@ -960,6 +982,12 @@ it.effect("starts the provider when checkpoint baseline capture fails", () =>
     const layerTest = RunExecutionService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
+          Layer.mock(ProjectionStore.ProjectionStoreV2)({
+            getThreadRecords: () => Effect.succeed({ providerTurns: [] } as never),
+          }),
+          Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+            settleTurn: () => Effect.void,
+          }),
           McpAppModelContext.layerEmpty,
           Layer.mock(CheckpointService.CheckpointServiceV2)({
             captureBaseline: () =>
@@ -1078,6 +1106,12 @@ it.effect.each(["failure", "interruption", "stale-attempt", "start-guard"] as co
       const layerTest = RunExecutionService.layer.pipe(
         Layer.provide(
           Layer.mergeAll(
+            Layer.mock(ProjectionStore.ProjectionStoreV2)({
+              getThreadRecords: () => Effect.succeed({ providerTurns: [] } as never),
+            }),
+            Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+              settleTurn: () => Effect.void,
+            }),
             McpAppModelContext.layerEmpty,
             Layer.mock(CheckpointService.CheckpointServiceV2)({
               captureBaseline: () =>
@@ -1249,6 +1283,12 @@ it.effect("keeps ingesting owned child events after the root turn terminalizes",
     const layerTest = RunExecutionService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
+          Layer.mock(ProjectionStore.ProjectionStoreV2)({
+            getThreadRecords: () => Effect.succeed({ providerTurns: [] } as never),
+          }),
+          Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+            settleTurn: () => Effect.void,
+          }),
           McpAppModelContext.layerEmpty,
           Layer.mock(CheckpointService.CheckpointServiceV2)({ captureBaseline: () => Effect.void }),
           Layer.mock(EventSink.EventSinkV2)({
@@ -1740,6 +1780,12 @@ it.effect("keeps ingesting a late background turn-item completion after root set
     const layerTest = RunExecutionService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
+          Layer.mock(ProjectionStore.ProjectionStoreV2)({
+            getThreadRecords: () => Effect.succeed({ providerTurns: [] } as never),
+          }),
+          Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+            settleTurn: () => Effect.void,
+          }),
           McpAppModelContext.layerEmpty,
           Layer.mock(CheckpointService.CheckpointServiceV2)({
             captureBaseline: () => Effect.void,
@@ -1904,6 +1950,12 @@ it.effect(
       const layerTest = RunExecutionService.layer.pipe(
         Layer.provide(
           Layer.mergeAll(
+            Layer.mock(ProjectionStore.ProjectionStoreV2)({
+              getThreadRecords: () => Effect.succeed({ providerTurns: [] } as never),
+            }),
+            Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+              settleTurn: () => Effect.void,
+            }),
             McpAppModelContext.layerEmpty,
             Layer.mock(CheckpointService.CheckpointServiceV2)({
               captureBaseline: () => Effect.void,
@@ -2072,6 +2124,12 @@ it.effect(
       const layerTest = RunExecutionService.layer.pipe(
         Layer.provide(
           Layer.mergeAll(
+            Layer.mock(ProjectionStore.ProjectionStoreV2)({
+              getThreadRecords: () => Effect.succeed({ providerTurns: [] } as never),
+            }),
+            Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+              settleTurn: () => Effect.void,
+            }),
             McpAppModelContext.layerEmpty,
             Layer.mock(CheckpointService.CheckpointServiceV2)({
               captureBaseline: () => Effect.void,
@@ -2446,6 +2504,12 @@ it.effect(
       const layerTest = RunExecutionService.layer.pipe(
         Layer.provide(
           Layer.mergeAll(
+            Layer.mock(ProjectionStore.ProjectionStoreV2)({
+              getThreadRecords: () => Effect.succeed({ providerTurns: [] } as never),
+            }),
+            Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+              settleTurn: () => Effect.void,
+            }),
             McpAppModelContext.layerEmpty,
             Layer.mock(CheckpointService.CheckpointServiceV2)({
               captureBaseline: () => Effect.void,
@@ -3172,6 +3236,12 @@ function captureRootRunTermination(input: {
     const layerTest = RunExecutionService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
+          Layer.mock(ProjectionStore.ProjectionStoreV2)({
+            getThreadRecords: () => Effect.succeed({ providerTurns: [] } as never),
+          }),
+          Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+            settleTurn: () => Effect.void,
+          }),
           McpAppModelContext.layerEmpty,
           Layer.mock(CheckpointService.CheckpointServiceV2)({ captureBaseline: () => Effect.void }),
           Layer.mock(EventSink.EventSinkV2)({
@@ -3654,6 +3724,12 @@ function runBackgroundItemScenario(
     const layerTest = RunExecutionService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
+          Layer.mock(ProjectionStore.ProjectionStoreV2)({
+            getThreadRecords: () => Effect.succeed({ providerTurns: [] } as never),
+          }),
+          Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+            settleTurn: () => Effect.void,
+          }),
           McpAppModelContext.layerEmpty,
           Layer.mock(CheckpointService.CheckpointServiceV2)({ captureBaseline: () => Effect.void }),
           Layer.mock(EventSink.EventSinkV2)({
@@ -3793,4 +3869,81 @@ it.effect("releases ingestion after idle subagent rows and items settle", () =>
       "root-finalized",
     ]);
   }),
+);
+
+// Persisted state is the contract: synthetic failures do not receive the
+// adapter's terminal provider-turn snapshot, even after a successful start.
+it.effect.each(["ingestion", "start"] as const)(
+  "closes the durable provider turn after a synthetic %s failure",
+  (mode) =>
+    Effect.gen(function* () {
+      const stores = Layer.merge(EventStore.layer, ProjectionStore.layer).pipe(
+        Layer.provide(SqlitePersistence.layerMemory),
+      );
+      const sink = EventSink.layer.pipe(
+        Layer.provide(Layer.mergeAll(stores, SqlitePersistence.layerMemory)),
+      );
+      const execution = RunExecutionService.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            stores,
+            sink,
+            IdAllocator.layer,
+            ServerSettings.layerTest(),
+            McpAppModelContext.layerEmpty,
+            Layer.mock(CheckpointService.CheckpointServiceV2)({
+              captureBaseline: () => Effect.void,
+            }),
+            Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+              settleTurn: () => Effect.void,
+            }),
+            Layer.mock(ProviderEventIngestor.ProviderEventIngestorV2)({
+              ingestNormalized: () => Effect.succeed([]),
+            }),
+          ),
+        ),
+      );
+      yield* Effect.gen(function* () {
+        const fixture = yield* seedProviderRun(`synthetic-${mode}`);
+        const done = yield* Deferred.make<void>();
+        const service = yield* RunExecutionService.RunExecutionServiceV2;
+        yield* service.startRootRun({
+          ...fixture,
+          commandId: CommandId.make(`command:synthetic-${mode}`),
+          attemptId: fixture.attempt.id,
+          providerTurnOrdinal: 1,
+          session: {
+            events: Stream.empty,
+            subscribeEvents: Effect.succeed({
+              events: mode === "ingestion" ? Stream.die("ingestion failed") : Stream.never,
+              close: Deferred.succeed(done, undefined),
+            }),
+            startTurn: () => (mode === "start" ? Effect.die("start failed") : Effect.void),
+          } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime,
+          message: {
+            messageId: fixture.run.userMessageId,
+            text: "test",
+            attachments: [],
+            createdBy: "user",
+            creationSource: "web",
+          },
+          modelSelection: fixture.run.modelSelection,
+          runtimePolicy: {
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            cwd: process.cwd(),
+          },
+        });
+        if (mode === "ingestion") yield* Deferred.await(done);
+        const projection = yield* (yield* ProjectionStore.ProjectionStoreV2).getThreadProjection(
+          fixture.run.threadId,
+        );
+        assert.equal(projection.runs[0]?.status, "failed");
+        assert.equal(projection.attempts[0]?.status, "failed");
+        assert.equal(projection.providerTurns[0]?.status, "failed");
+        assert.isNotNull(projection.providerTurns[0]?.completedAt);
+        assert.deepEqual(projection.providerTurns[0]?.nativeTurnRef, fixture.turn.nativeTurnRef);
+        assert.deepEqual(projection.providerTurns[0]?.tokenUsage, fixture.turn.tokenUsage);
+      }).pipe(Effect.provide(Layer.mergeAll(stores, sink, execution)));
+    }),
 );

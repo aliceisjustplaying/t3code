@@ -267,6 +267,7 @@ it.effect(
       const layerSessionManager = Layer.succeed(
         ProviderSessionManager.ProviderSessionManagerV2,
         ProviderSessionManager.ProviderSessionManagerV2.of({
+          settleTurn: () => Effect.die("unused settleTurn"),
           shutdown: Effect.void,
           open: () => Effect.die("unused open"),
           isThreadLoaded: () => Effect.die("unused isThreadLoaded"),

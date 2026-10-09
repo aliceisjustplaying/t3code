@@ -152,6 +152,13 @@ export type ProviderSessionManagerV2Error = typeof ProviderSessionManagerV2Error
 
 export interface ProviderSessionManagerV2Shape {
   readonly shutdown: Effect.Effect<void>;
+  /** Clears a synthetically settled attempt without idling another turn on a shared runtime. */
+  readonly settleTurn: (input: {
+    readonly providerSessionId: ProviderSessionId;
+    readonly providerThreadId: ProviderThreadId;
+    readonly runOrdinal: number;
+    readonly attemptId: RunAttemptId;
+  }) => Effect.Effect<void, ProviderSessionManagerV2Error>;
   readonly open: (input: {
     readonly threadId: ThreadId;
     readonly providerSessionId: ProviderSessionId;
@@ -1536,23 +1543,30 @@ export const layerWithOptions = (
         withActivityError(
           providerSessionId,
           Effect.gen(function* () {
-            const key = sessionKey(providerSessionId);
-            const now = yield* Clock.currentTimeMillis;
-            const idleFiber = yield* Ref.modify(sessions, (current) => {
-              const entry = current.get(key);
-              if (entry === undefined) {
-                return [null, current] as const;
-              }
-              const updated = new Map(current);
-              updated.set(key, {
-                ...entry,
-                busyTurns: new Map(entry.busyTurns).set(turnKey, attemptId),
-                idleFiber: null,
-                lastActivityAtMs: now,
-                pinnedSinceMs: null,
-              });
-              return [entry.idleFiber, updated] as const;
-            });
+            const entry = (yield* Ref.get(sessions)).get(sessionKey(providerSessionId));
+            if (entry === undefined) return;
+            const idleFiber = yield* entry.requestEventPermit.withPermits(1)(
+              Effect.gen(function* () {
+                const key = sessionKey(providerSessionId);
+                const now = yield* Clock.currentTimeMillis;
+                const idleFiber = yield* Ref.modify(sessions, (current) => {
+                  const entry = current.get(key);
+                  if (entry === undefined) {
+                    return [null, current] as const;
+                  }
+                  const updated = new Map(current);
+                  updated.set(key, {
+                    ...entry,
+                    busyTurns: new Map(entry.busyTurns).set(turnKey, attemptId),
+                    idleFiber: null,
+                    lastActivityAtMs: now,
+                    pinnedSinceMs: null,
+                  });
+                  return [entry.idleFiber, updated] as const;
+                });
+                return idleFiber;
+              }),
+            );
             yield* cancelIdleFiber(idleFiber);
           }),
         );
@@ -1591,6 +1605,92 @@ export const layerWithOptions = (
             });
             yield* scheduleIdleReleaseInternal(providerSessionId);
             yield* scheduleThreadUnload(providerSessionId, providerThreadId);
+          }),
+        );
+
+      const settleTurn: ProviderSessionManagerV2Shape["settleTurn"] = (input) =>
+        withActivityError(
+          input.providerSessionId,
+          Effect.gen(function* () {
+            const entry = (yield* Ref.get(sessions)).get(sessionKey(input.providerSessionId));
+            if (entry === undefined) return;
+            yield* markIdle(
+              input.providerSessionId,
+              input.providerThreadId,
+              input.runOrdinal,
+              input.attemptId,
+            );
+            yield* entry.requestEventPermit.withPermits(1)(
+              Effect.gen(function* () {
+                const current = (yield* Ref.get(sessions)).get(sessionKey(input.providerSessionId));
+                if (current?.runtime !== entry.runtime || current.busyTurns.size > 0) return;
+                if (
+                  (yield* (
+                    entry.runtime.getBackgroundWork ??
+                      Effect.succeed({ pending: false, retained: false })
+                  )).pending
+                )
+                  return;
+                let session: OrchestrationV2ProviderSession | undefined;
+                for (const threadId of current.attachedThreadIds) {
+                  const records = yield* projectionStore.getThreadRecords(threadId, [
+                    "providerSessions",
+                    "providerThreads",
+                    "providerTurns",
+                    "runs",
+                    "turnItems",
+                  ]);
+                  const threadIds = new Set(
+                    records.providerThreads
+                      .filter((thread) => thread.providerSessionId === input.providerSessionId)
+                      .map((thread) => thread.id),
+                  );
+                  if (
+                    records.providerTurns.some(
+                      (turn) =>
+                        threadIds.has(turn.providerThreadId) &&
+                        (turn.status === "pending" || turn.status === "running"),
+                    ) ||
+                    records.runs.some(
+                      (run) =>
+                        run.providerThreadId !== null &&
+                        threadIds.has(run.providerThreadId) &&
+                        (run.status === "starting" ||
+                          run.status === "running" ||
+                          run.status === "waiting"),
+                    ) ||
+                    records.providerThreads.some(
+                      (thread) =>
+                        threadIds.has(thread.id) &&
+                        (thread.pendingBackgroundTasks?.length ?? 0) > 0,
+                    ) ||
+                    records.turnItems.some(
+                      (item) =>
+                        item.providerThreadId != null &&
+                        threadIds.has(item.providerThreadId) &&
+                        ["command_execution", "dynamic_tool", "subagent"].includes(item.type) &&
+                        ["pending", "running", "waiting"].includes(item.status),
+                    )
+                  )
+                    return;
+                  session ??= records.providerSessions.find(
+                    (candidate) => candidate.id === input.providerSessionId,
+                  );
+                }
+                if (session?.status !== "running") return;
+                yield* writeProviderSessionEvents({
+                  runtime: entry.runtime,
+                  threadIds: current.attachedThreadIds,
+                  type: "provider-session.updated",
+                  payload: {
+                    ...session,
+                    status: "ready",
+                    updatedAt: yield* DateTime.now,
+                    lastError: null,
+                  },
+                });
+              }),
+            );
           }),
         );
 
@@ -2397,6 +2497,7 @@ export const layerWithOptions = (
       );
 
       return ProviderSessionManagerV2.of({
+        settleTurn,
         shutdown,
         open: (input) =>
           sessionOpen.withLock(

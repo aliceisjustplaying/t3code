@@ -6318,3 +6318,126 @@ it.effect.each(["newer", "different-owner"] as const)(
       );
     }),
 );
+
+it.effect.each([false, true])(
+  "synthetic settlement preserves shared session work (background pending: %s)",
+  (pending) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      yield* Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        const sessionId = ids.derive.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+        });
+        const threadA = ThreadId.make("thread:synthetic-session:a");
+        const threadB = ThreadId.make("thread:synthetic-session:b");
+        yield* sink.write({
+          events: [
+            yield* makeThreadCreatedEvent({ idAllocator: ids, threadId: threadA, now }),
+            yield* makeThreadCreatedEvent({ idAllocator: ids, threadId: threadB, now }),
+          ],
+        });
+        const runtime = yield* manager.open({
+          threadId: threadA,
+          providerSessionId: sessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        yield* manager.open({
+          threadId: threadB,
+          providerSessionId: sessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const begin = (threadId: ThreadId) =>
+          Effect.gen(function* () {
+            const runId = ids.derive.run({ threadId, ordinal: 1 });
+            const attemptId = ids.derive.runAttempt({ runId, attemptOrdinal: 1 });
+            const providerThread = makeProviderThread({
+              idAllocator: ids,
+              threadId,
+              providerSessionId: sessionId,
+              now,
+              nativeThreadId: String(threadId),
+            });
+            yield* runtime.startTurn({
+              appThread: (yield* projections.getThreadProjection(threadId)).thread,
+              threadId,
+              runId,
+              runOrdinal: 1,
+              providerTurnOrdinal: 1,
+              attemptId,
+              rootNodeId: ids.derive.rootNode({ runId }),
+              providerThread,
+              message: {
+                messageId: yield* ids.allocate.message({ threadId, ordinal: 1 }),
+                text: "test",
+                attachments: [],
+                createdBy: "user",
+                creationSource: "web",
+              },
+              modelSelection,
+              runtimePolicy,
+            });
+            return {
+              providerSessionId: sessionId,
+              providerThreadId: providerThread.id,
+              runOrdinal: 1,
+              attemptId,
+            };
+          });
+        const a = yield* begin(threadA);
+        const b = yield* begin(threadB);
+        yield* sink.write({
+          events: [
+            {
+              id: yield* ids.allocate.event({ threadId: threadA }),
+              type: "provider-session.updated",
+              threadId: threadA,
+              occurredAt: now,
+              payload: { ...runtime.providerSession, status: "running" },
+            },
+          ],
+        });
+        yield* manager.settleTurn(a);
+        yield* manager.settleTurn(a);
+        assert.equal(
+          (yield* projections.getThreadProjection(threadA)).providerSessions[0]?.status,
+          "running",
+        );
+        // Even the same native turn key cannot clear a successor attempt.
+        yield* manager.settleTurn({
+          ...b,
+          attemptId: RunAttemptId.make("attempt:synthetic-session:old"),
+        });
+        assert.equal(
+          (yield* projections.getThreadProjection(threadA)).providerSessions[0]?.status,
+          "running",
+        );
+        yield* manager.settleTurn(b);
+        assert.equal(
+          (yield* projections.getThreadProjection(threadA)).providerSessions[0]?.status,
+          pending ? "running" : "ready",
+        );
+        assert.equal(
+          (yield* projections.getThreadProjection(threadB)).providerSessions[0]?.status,
+          pending ? "running" : "ready",
+        );
+        const sequence = yield* (yield* EventStore.EventStoreV2).latestSequence();
+        yield* manager.settleTurn(b);
+        assert.equal(yield* (yield* EventStore.EventStoreV2).latestSequence(), sequence);
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60_000,
+            getBackgroundWork: Effect.succeed({ pending, retained: false }),
+          }),
+        ),
+      );
+    }),
+);

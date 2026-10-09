@@ -1,6 +1,7 @@
 import { assert, it, vi } from "@effect/vitest";
 import {
   MessageId,
+  EventId,
   NodeId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -25,6 +26,11 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderRuntimeRecovery from "./ProviderRuntimeRecoveryService.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as DateTime from "effect/DateTime";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as EventStore from "./EventStore.ts";
+import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
+import { seedProviderRun } from "./testkit/providerRun.ts";
 
 it.effect("leaves durable effects for the worker after runtime reconciliation", () =>
   Effect.gen(function* () {
@@ -768,7 +774,7 @@ it.effect(
       runs: [
         {
           id: runId,
-          status: "starting",
+          status: "running",
           providerThreadId,
           providerInstanceId: ProviderInstanceId.make("codex"),
         },
@@ -1486,3 +1492,76 @@ it.effect("leaves delegated tasks to their own child threads after process loss"
     assert.deepEqual(noted, [`subagent ${nativeSubagentId}`]);
   }).pipe(Effect.provide(layer));
 });
+
+it.effect.each(["stopped", "running"] as const)(
+  "repairs an older failed run's orphaned turn with a %s session idempotently",
+  (sessionStatus) => {
+    const stores = Layer.merge(EventStore.layer, ProjectionStore.layer).pipe(
+      Layer.provide(SqlitePersistence.layerMemory),
+    );
+    const sink = EventSink.layer.pipe(
+      Layer.provide(Layer.mergeAll(stores, SqlitePersistence.layerMemory)),
+    );
+    const outbox = EffectOutbox.layer.pipe(Layer.provide(SqlitePersistence.layerMemory));
+    const recovery = ProviderRuntimeRecovery.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(stores, sink, outbox, IdAllocator.layer, ServerSettings.layerTest()),
+      ),
+    );
+    return Effect.gen(function* () {
+      const fixture = yield* seedProviderRun(`orphaned-turn-${sessionStatus}`, "failed");
+      const now = yield* DateTime.now;
+      const eventSink = yield* EventSink.EventSinkV2;
+      yield* eventSink.write({
+        events: [
+          {
+            id: EventId.make(`event:orphaned-turn-${sessionStatus}:session`),
+            type: "provider-session.attached",
+            threadId: fixture.run.threadId,
+            occurredAt: now,
+            payload: {
+              id: fixture.providerSessionId,
+              driver: fixture.providerThread.driver,
+              providerInstanceId: fixture.run.providerInstanceId,
+              status: sessionStatus,
+              cwd: process.cwd(),
+              model: "test-model",
+              capabilities: CodexProviderCapabilitiesV2,
+              createdAt: now,
+              updatedAt: now,
+              lastError: null,
+            },
+          },
+          {
+            id: EventId.make(`event:orphaned-turn-${sessionStatus}:latest`),
+            type: "run.created",
+            threadId: fixture.run.threadId,
+            occurredAt: now,
+            payload: {
+              ...fixture.run,
+              id: RunId.make(`run:orphaned-turn-${sessionStatus}:latest`),
+              ordinal: 2,
+              status: "completed",
+              activeAttemptId: null,
+            },
+          },
+        ],
+      });
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      assert.include(yield* projections.getRecoveryThreadIds("runtime"), fixture.run.threadId);
+      const service = yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService;
+      const result = yield* service.recover;
+      assert.equal(result.terminalizedRuns, 0);
+      const projection = yield* projections.getThreadProjection(fixture.run.threadId);
+      assert.equal(projection.runs[0]?.status, "failed");
+      assert.equal(projection.providerTurns[0]?.status, "failed");
+      assert.isNotNull(projection.providerTurns[0]?.completedAt);
+      assert.deepEqual(projection.providerTurns[0]?.tokenUsage, fixture.turn.tokenUsage);
+      assert.equal(projection.providerSessions[0]?.status, "stopped");
+      const sequence = yield* (yield* EventStore.EventStoreV2).latestSequence();
+      yield* service.recover;
+      assert.equal(yield* (yield* EventStore.EventStoreV2).latestSequence(), sequence);
+      assert.notInclude(yield* projections.getRecoveryThreadIds("runtime"), fixture.run.threadId);
+    }).pipe(Effect.provide(Layer.mergeAll(stores, sink, recovery)));
+  },
+);

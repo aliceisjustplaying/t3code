@@ -43,7 +43,9 @@ import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
+import * as ProjectionStore from "./ProjectionStore.ts";
 import type { ProjectionStoreV2Error } from "./ProjectionStore.ts";
+import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import {
   makeProviderFailure,
   makeProviderFailureTurnItem,
@@ -543,6 +545,8 @@ export const layer: Layer.Layer<
   never,
   | CheckpointService.CheckpointServiceV2
   | EventSink.EventSinkV2
+  | ProjectionStore.ProjectionStoreV2
+  | ProviderSessionManager.ProviderSessionManagerV2
   | IdAllocator.IdAllocatorV2
   | ProviderEventIngestor.ProviderEventIngestorV2
   | ServerSettings.ServerSettingsService
@@ -552,6 +556,8 @@ export const layer: Layer.Layer<
   Effect.gen(function* () {
     const checkpointService = yield* CheckpointService.CheckpointServiceV2;
     const eventSink = yield* EventSink.EventSinkV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const sessionManager = yield* ProviderSessionManager.ProviderSessionManagerV2;
     const idAllocator = yield* IdAllocator.IdAllocatorV2;
     const providerEventIngestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
     const serverSettings = yield* ServerSettings.ServerSettingsService;
@@ -671,6 +677,29 @@ export const layer: Layer.Layer<
         // Stopped runs capture too: their checkpoint is the rollback point for
         // the next message. The capture is enqueued with these terminal events,
         // ahead of any later run's start on this thread's effect lane.
+        // A synthetic terminal bypasses the adapter's provider_turn.updated.
+        // Read the durable identity (not the attempt snapshot captured at start)
+        // and close only this attempt's still-open turns in the same guarded write.
+        const syntheticTurnEvents: Array<OrchestrationV2DomainEvent> = [];
+        if (input.providerTerminalReceived !== true) {
+          const { providerTurns } = yield* projections.getThreadRecords(input.run.threadId, [
+            "providerTurns",
+          ]);
+          for (const turn of providerTurns) {
+            if (turn.runAttemptId !== input.attempt.id || isTerminalProviderTurnStatus(turn.status))
+              continue;
+            syntheticTurnEvents.push({
+              id: yield* allocateEventId(),
+              type: "provider-turn.updated",
+              threadId: input.run.threadId,
+              runId: input.run.id,
+              nodeId: turn.nodeId,
+              providerInstanceId: input.run.providerInstanceId,
+              occurredAt: completedAt,
+              payload: { ...turn, status: input.terminal.status, completedAt },
+            });
+          }
+        }
         const finalization = {
           effects:
             input.terminal.status === "completed" ||
@@ -693,6 +722,7 @@ export const layer: Layer.Layer<
             // Terminalize open run-owned subagent rows before the root run
             // settles so projections never keep a forever-running subagent card.
             ...cascadedSubagentEvents,
+            ...syntheticTurnEvents,
             ...(finalizedAttempt === null
               ? []
               : [
@@ -799,6 +829,17 @@ export const layer: Layer.Layer<
           }
         } else {
           yield* eventSink.writeWithEffects(finalization);
+        }
+        if (
+          input.providerTerminalReceived !== true &&
+          input.providerThread.providerSessionId !== null
+        ) {
+          yield* sessionManager.settleTurn({
+            providerSessionId: input.providerThread.providerSessionId,
+            providerThreadId: input.providerThread.id,
+            runOrdinal: input.run.ordinal,
+            attemptId: input.attempt.id,
+          });
         }
         yield* input.refreshAfterTurn;
       });

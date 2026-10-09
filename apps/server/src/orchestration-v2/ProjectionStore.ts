@@ -595,6 +595,21 @@ function needsRecovery(
             ["preparing", "starting", "running", "waiting"].includes(run.status) ||
             (run.status === "queued" && run.queueHeld !== true),
         ) ||
+        projection.providerTurns.some(
+          (turn) =>
+            (turn.status === "pending" || turn.status === "running") &&
+            projection.attempts.some(
+              (attempt) =>
+                attempt.id === turn.runAttemptId &&
+                projection.runs.some(
+                  (run) =>
+                    run.id === attempt.runId &&
+                    ["completed", "interrupted", "failed", "cancelled", "rolled_back"].includes(
+                      run.status,
+                    ),
+                ),
+            ),
+        ) ||
         projection.runtimeRequests.some((request) => request.status === "pending") ||
         projection.providerSessions.some(
           (session) => session.status !== "stopped" && session.status !== "error",
@@ -3716,6 +3731,13 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   ON bindings.provider_session_id = sessions.provider_session_id
                 WHERE sessions.status NOT IN ('stopped', 'error')
                 UNION
+                SELECT turn.thread_id FROM orchestration_v2_projection_provider_turns AS turn
+                JOIN orchestration_v2_projection_run_attempts AS attempt
+                  ON attempt.attempt_id = turn.run_attempt_id
+                JOIN orchestration_v2_projection_runs AS run ON run.run_id = attempt.run_id
+                WHERE turn.status IN ('pending', 'running')
+                  AND run.status IN ('completed', 'interrupted', 'failed', 'cancelled', 'rolled_back')
+                UNION
                 SELECT thread_id FROM pending_provider_threads
                 UNION
                 SELECT nodes.thread_id FROM pending_provider_threads
@@ -4072,6 +4094,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               WHERE run.thread_id = ${threadId}
                 AND (
                   run.status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
+                  OR run.run_id IN (
+                    SELECT attempt.run_id FROM orchestration_v2_projection_run_attempts AS attempt
+                    JOIN orchestration_v2_projection_provider_turns AS turn
+                      ON turn.run_attempt_id = attempt.attempt_id
+                    WHERE turn.thread_id = ${threadId} AND turn.status IN ('pending', 'running')
+                  )
                   OR run.run_id = (
                     SELECT latest.run_id FROM orchestration_v2_projection_runs AS latest
                     WHERE latest.thread_id = ${threadId}
@@ -4109,11 +4137,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               SELECT attempt.payload_json
               FROM orchestration_v2_projection_run_attempts AS attempt
               WHERE attempt.thread_id = ${threadId}
-                AND attempt.run_id IN (
+                AND (attempt.run_id IN (
                   SELECT run_id FROM orchestration_v2_projection_runs
                   WHERE thread_id = ${threadId}
                     AND status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
-                )
+                ) OR attempt.attempt_id IN (
+                  SELECT run_attempt_id FROM orchestration_v2_projection_provider_turns
+                  WHERE thread_id = ${threadId} AND status IN ('pending', 'running')
+                ))
               ORDER BY attempt.run_id ASC, attempt.attempt_ordinal ASC
             `,
           sql<PayloadRow>`
@@ -4221,16 +4252,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               SELECT provider_turn.payload_json
               FROM orchestration_v2_projection_provider_turns AS provider_turn
               WHERE provider_turn.thread_id = ${threadId}
-                AND provider_turn.status IN ('pending', 'starting', 'running', 'waiting')
-                AND provider_turn.run_attempt_id IN (
-                  SELECT attempt_id FROM orchestration_v2_projection_run_attempts
-                  WHERE thread_id = ${threadId}
-                    AND run_id IN (
-                      SELECT run_id FROM orchestration_v2_projection_runs
-                      WHERE thread_id = ${threadId}
-                        AND status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
-                    )
-                )
+                AND provider_turn.status IN ('pending', 'running')
               ORDER BY provider_turn.provider_thread_id ASC, provider_turn.ordinal ASC
             `,
           sql<PayloadRow>`
