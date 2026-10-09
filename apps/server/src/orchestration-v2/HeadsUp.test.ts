@@ -40,7 +40,7 @@ import * as EffectOutbox from "./EffectOutbox.ts";
 import { parseHeadsUpNotice } from "./HeadsUpNotice.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
-import type { ProviderAdapterV2Shape } from "@t3tools/provider-core/server/ProviderAdapter";
+import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 
@@ -78,7 +78,7 @@ const adapter = {
   getCapabilities: () => Effect.succeed(CodexProviderCapabilitiesV2),
   planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" as const }),
   openSession: () => Effect.die("No provider process needed for heads-up controls"),
-} as ProviderAdapterV2Shape;
+} as ProviderAdapter.ProviderAdapterV2["Service"];
 const database = SqlitePersistence.layerMemory;
 const orchestratorLayer = Layer.mergeAll(
   database,
@@ -509,7 +509,7 @@ const makeFeedbackFixture = Effect.fnUntraced(function* (
     createdAt: now,
     updatedAt: now,
   };
-  const piAdapter: ProviderAdapterV2Shape = {
+  const piAdapter: ProviderAdapter.ProviderAdapterV2["Service"] = {
     ...adapter,
     instanceId: piInstance,
     driver: pi,

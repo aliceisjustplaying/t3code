@@ -9,7 +9,8 @@ import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
 import { TestClock } from "effect/testing";
 import * as Stream from "effect/Stream";
-import { ChildProcess, ChildProcessSpawner } from "effect/process";
+import * as ChildProcess from "effect/process/ChildProcess";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import { checkPiProviderStatus, MINIMUM_PI_VERSION } from "./status.ts";
 

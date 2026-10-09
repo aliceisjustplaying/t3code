@@ -21,7 +21,8 @@ import * as Layer from "effect/Layer";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/process";
-import { layerTestProviderHost } from "@t3tools/provider-testing/host";
+import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
+import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as Orchestrator from "../src/orchestration-v2/Orchestrator.ts";
 import * as EffectOutbox from "../src/orchestration-v2/EffectOutbox.ts";
@@ -226,7 +227,8 @@ const program = Effect.gen(function* () {
     Layer.mergeAll(
       NodeServices.layer,
       IdAllocator.layer,
-      layerTestProviderHost().pipe(Layer.provide(NodeServices.layer)),
+      McpProviderSessions.layer,
+      TestProviderHost.layer().pipe(Layer.provide(NodeServices.layer)),
     ),
   ),
 );

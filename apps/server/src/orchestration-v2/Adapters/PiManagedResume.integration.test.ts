@@ -15,7 +15,8 @@ import {
 } from "@t3tools/contracts";
 import { PI_PROVIDER } from "@t3tools/provider-pi/server";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
-import * as ProviderContinuationRequests from "@t3tools/provider-core/server/continuationRequests";
+import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import {
   ProviderAdapterV2RuntimePolicy,
   type ProviderAdapterV2Event,
@@ -54,6 +55,7 @@ const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
 const modelSelection = (model: string): ModelSelection => ({ instanceId: PI_INSTANCE_ID, model });
 const layerTest = Layer.mergeAll(
   NodeServices.layer,
+  McpProviderSessions.layer,
   IdAllocator.layer,
   ServerConfig.layerTest(process.cwd(), { prefix: "t3-pi-managed-veto-" }).pipe(
     Layer.provide(NodeServices.layer),

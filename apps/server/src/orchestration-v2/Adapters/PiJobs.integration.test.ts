@@ -29,6 +29,7 @@ import * as ProjectionStore from "../ProjectionStore.ts";
 import * as ProviderEventIngestor from "../ProviderEventIngestor.ts";
 import * as ThreadCommandExecutor from "../ThreadCommandExecutor.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import {
   ProviderAdapterV2RuntimePolicy,
   type ProviderAdapterV2Event,
@@ -44,6 +45,7 @@ const ingestor = ProviderEventIngestor.layer.pipe(
 );
 const layer = Layer.mergeAll(
   NodeServices.layer,
+  McpProviderSessions.layer,
   stores,
   sink,
   ingestor,
