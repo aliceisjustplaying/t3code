@@ -31,7 +31,7 @@ import * as EffectWorker from "./EffectWorker.ts";
 import {
   ProviderAdapterEnsureThreadError,
   ProviderAdapterResumeThreadError,
-} from "./ProviderAdapter.ts";
+} from "@t3tools/provider-core/server/ProviderAdapter";
 import { applyOrchestrationV2ProjectionEvent } from "../../../../packages/client-runtime/src/state/orchestrationV2Projection.ts";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -40,7 +40,7 @@ import * as EffectOutbox from "./EffectOutbox.ts";
 import { parseHeadsUpNotice } from "./HeadsUpNotice.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
-import type { ProviderAdapterV2Shape } from "./ProviderAdapter.ts";
+import type { ProviderAdapterV2Shape } from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 

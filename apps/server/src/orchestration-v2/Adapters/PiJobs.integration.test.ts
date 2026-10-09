@@ -28,9 +28,13 @@ import * as EventStore from "../EventStore.ts";
 import * as ProjectionStore from "../ProjectionStore.ts";
 import * as ProviderEventIngestor from "../ProviderEventIngestor.ts";
 import * as ThreadCommandExecutor from "../ThreadCommandExecutor.ts";
-import * as IdAllocator from "../IdAllocator.ts";
-import { ProviderAdapterV2RuntimePolicy, type ProviderAdapterV2Event } from "../ProviderAdapter.ts";
-import { makePiAdapterV2 } from "./PiAdapterV2.ts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import {
+  ProviderAdapterV2RuntimePolicy,
+  type ProviderAdapterV2Event,
+} from "@t3tools/provider-core/server/ProviderAdapter";
+import * as PiTestkit from "./PiAdapterV2.testkit.ts";
+import * as ProviderAdapterRegistry from "../ProviderAdapterRegistry.ts";
 
 const database = SqlitePersistence.layerMemory;
 const stores = Layer.merge(EventStore.layer, ProjectionStore.layer).pipe(Layer.provide(database));
@@ -87,7 +91,6 @@ export default function(pi) {
   }});
 }`,
         );
-        const ids = yield* IdAllocator.IdAllocatorV2;
         const eventSink = yield* EventSink.EventSinkV2;
         const projections = yield* ProjectionStore.ProjectionStoreV2;
         const eventsIngestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
@@ -130,20 +133,25 @@ export default function(pi) {
             },
           ],
         });
-        const adapter = makePiAdapterV2({
-          instanceId,
-          settings: {
-            enabled: true,
-            binaryPath: process.env.PI_TEST_BINARY || "pi",
-            launchArgs: `--no-extensions --no-skills --no-prompt-templates --no-context-files --session-dir ${encode(dir + "/sessions")} --extension ${encode(driver)}`,
-            customModels: [],
-          },
-          environment: { ...process.env, PI_CODING_AGENT_DIR: dir + "/agent", TMPDIR: dir },
-          spawner: yield* ChildProcessSpawner.ChildProcessSpawner,
-          fileSystem: fs,
-          idAllocator: ids,
-          serverConfig: yield* ServerConfig.ServerConfig,
-        });
+        const adapter = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2.use((registry) =>
+          registry.get(instanceId),
+        ).pipe(
+          Effect.provide(
+            PiTestkit.layer({
+              scenario: "isolated Pi jobs",
+              binaryPath: process.env.PI_TEST_BINARY || "pi",
+              launchArgs: `--no-extensions --no-skills --no-prompt-templates --no-context-files --session-dir ${encode(dir + "/sessions")} --extension ${encode(driver)}`,
+              environment: [
+                { name: "PI_CODING_AGENT_DIR", value: dir + "/agent", sensitive: false },
+                { name: "TMPDIR", value: dir, sensitive: false },
+              ],
+              spawner: Layer.succeed(
+                ChildProcessSpawner.ChildProcessSpawner,
+                yield* ChildProcessSpawner.ChildProcessSpawner,
+              ),
+            }),
+          ),
+        );
         const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
           runtimeMode: "full-access",
           interactionMode: "default",

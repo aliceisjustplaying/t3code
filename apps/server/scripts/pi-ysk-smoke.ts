@@ -21,8 +21,8 @@ import * as Layer from "effect/Layer";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/process";
-import * as ServerConfig from "../src/config.ts";
-import * as IdAllocator from "../src/orchestration-v2/IdAllocator.ts";
+import { layerTestProviderHost } from "@t3tools/provider-testing/host";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as Orchestrator from "../src/orchestration-v2/Orchestrator.ts";
 import * as EffectOutbox from "../src/orchestration-v2/EffectOutbox.ts";
 import * as EffectWorker from "../src/orchestration-v2/EffectWorker.ts";
@@ -31,7 +31,7 @@ import * as ProviderEventIngestor from "../src/orchestration-v2/ProviderEventIng
 import * as ProjectionStore from "../src/orchestration-v2/ProjectionStore.ts";
 import * as ThreadCommandExecutor from "../src/orchestration-v2/ThreadCommandExecutor.ts";
 import * as SqlitePersistence from "../src/persistence/Sqlite.ts";
-import { makePiAdapterV2 } from "../src/orchestration-v2/Adapters/PiAdapterV2.ts";
+import { makePiAdapterV2 } from "../../../packages/provider-pi/src/server/adapter.ts";
 import * as ProviderReplayHarness from "../src/orchestration-v2/testkit/ProviderReplayHarness.ts";
 
 // Opt-in integration check: real installed Pi + YSK, isolated state, no model calls.
@@ -70,7 +70,7 @@ const program = Effect.gen(function* () {
     interactionMode: "default" as const,
     cwd: root,
   };
-  const adapter = makePiAdapterV2({
+  const adapter = yield* makePiAdapterV2({
     instanceId,
     settings: {
       enabled: true,
@@ -79,11 +79,7 @@ const program = Effect.gen(function* () {
       customModels: [],
     },
     environment: { ...process.env, PI_CODING_AGENT_DIR: path.join(root, "agent") },
-    spawner,
-    fileSystem: fs,
-    idAllocator: yield* IdAllocator.IdAllocatorV2,
-    serverConfig: yield* ServerConfig.ServerConfig,
-  });
+  }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
   const scenario = `pi-ysk-${path.basename(root)}`;
   yield* Effect.addFinalizer(() =>
     fs.readDirectory(NodeOS.tmpdir()).pipe(
@@ -230,9 +226,7 @@ const program = Effect.gen(function* () {
     Layer.mergeAll(
       NodeServices.layer,
       IdAllocator.layer,
-      ServerConfig.layerTest(process.cwd(), { prefix: "t3-ysk-smoke-config-" }).pipe(
-        Layer.provide(NodeServices.layer),
-      ),
+      layerTestProviderHost().pipe(Layer.provide(NodeServices.layer)),
     ),
   ),
 );
