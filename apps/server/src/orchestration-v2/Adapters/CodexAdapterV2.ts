@@ -5116,16 +5116,18 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
               driver: CODEX_PROVIDER,
               node: artifacts.node,
             });
+            // The request becomes answerable when it is persisted. Publish
+            // its card first so an immediate answer can settle both together.
+            yield* emitProviderEvent({
+              type: "turn_item.updated",
+              driver: CODEX_PROVIDER,
+              turnItem: artifacts.turnItem,
+            });
             yield* emitProviderEvent({
               type: "runtime_request.updated",
               driver: CODEX_PROVIDER,
               threadId: artifacts.node.threadId,
               runtimeRequest: artifacts.request,
-            });
-            yield* emitProviderEvent({
-              type: "turn_item.updated",
-              driver: CODEX_PROVIDER,
-              turnItem: artifacts.turnItem,
             });
 
             const resolved = yield* Deferred.await(decision).pipe(
@@ -5558,6 +5560,7 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
                     });
               return {
                 type: "turn.terminal",
+                runAttemptId: input.context.input.attemptId,
                 driver: CODEX_PROVIDER,
                 providerThreadId: input.context.providerThread.id,
                 providerTurnId: input.context.providerTurnId,
@@ -5585,6 +5588,7 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
             }
             return {
               type: "turn.terminal",
+              runAttemptId: input.context.input.attemptId,
               driver: CODEX_PROVIDER,
               providerThreadId: input.context.providerThread.id,
               providerTurnId: input.context.providerTurnId,
@@ -6113,6 +6117,7 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
           });
           yield* emitRootTerminal(context, {
             type: "turn.terminal",
+            runAttemptId: turnInput.attemptId,
             driver: CODEX_PROVIDER,
             providerThreadId: turnInput.providerThread.id,
             providerTurnId: context.providerTurnId,
@@ -6470,26 +6475,26 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
           // (not pending) between turns, so idle release can win the race
           // against a long-delayed resume. Codex emits no resume-expected
           // signal to pin on.
-          hasPendingBackgroundWork: Effect.gen(function* () {
+          getBackgroundWork: Effect.gen(function* () {
             for (const items of (yield* Ref.get(runningCommandItemsByTurn)).values()) {
               if (items.size > 0) {
-                return true;
+                return { pending: true, retained: false };
               }
             }
             for (const items of (yield* Ref.get(runningDynamicToolsByTurn)).values()) {
               if (items.size > 0) {
-                return true;
+                return { pending: true, retained: false };
               }
             }
             if ((yield* Ref.get(pendingMcpAppCaptures)).size > 0) {
-              return true;
+              return { pending: true, retained: false };
             }
             for (const subagent of (yield* Ref.get(subagentThreads)).values()) {
               if (subagent.task.status === "running") {
-                return true;
+                return { pending: true, retained: false };
               }
             }
-            return false;
+            return { pending: false, retained: false };
           }),
           hasPendingBackgroundWorkForThread: (providerThread) =>
             Effect.gen(function* () {

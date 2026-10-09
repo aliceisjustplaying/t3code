@@ -398,6 +398,10 @@
     "./state/heads-up-inbox": {
       "types": "./src/state/headsUpInbox.ts",
       "default": "./src/state/headsUpInbox.ts"
+    },
+    "./use-thread-jobs": {
+      "types": "./src/useThreadJobs.ts",
+      "default": "./src/useThreadJobs.ts"
     }
   },
   "scripts": {
@@ -412,6 +416,7 @@
   },
   "devDependencies": {
     "@effect/vitest": "catalog:",
+    "@types/react": "~19.3.0",
     "@types/three": "0.180.0",
     "vite-plus": "catalog:"
   }

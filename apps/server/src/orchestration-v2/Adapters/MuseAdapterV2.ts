@@ -755,6 +755,7 @@ export function makeMuseAdapterV2(options: MuseAdapterV2Options): ProviderAdapte
           });
           yield* emit({
             type: "turn.terminal",
+            runAttemptId: turn.input.attemptId,
             driver: MUSE_PROVIDER,
             providerThreadId: turn.providerTurn.providerThreadId,
             providerTurnId: turn.providerTurn.id,
@@ -767,6 +768,7 @@ export function makeMuseAdapterV2(options: MuseAdapterV2Options): ProviderAdapte
         } else {
           yield* emit({
             type: "turn.terminal",
+            runAttemptId: turn.input.attemptId,
             driver: MUSE_PROVIDER,
             providerThreadId: turn.providerTurn.providerThreadId,
             providerTurnId: turn.providerTurn.id,
@@ -1762,9 +1764,10 @@ export function makeMuseAdapterV2(options: MuseAdapterV2Options): ProviderAdapte
         providerSession: session,
         events: Stream.fromQueue(events),
         // A running workflow or a held Muse turn keeps the host: idle release must wait.
-        hasPendingBackgroundWork: Effect.sync(
-          () => observedChildren.size > 0 || wake !== undefined,
-        ),
+        getBackgroundWork: Effect.sync(() => ({
+          pending: observedChildren.size > 0 || wake !== undefined,
+          retained: false,
+        })),
         ensureThread: (args) =>
           register(args).pipe(
             commands.withPermits(1),

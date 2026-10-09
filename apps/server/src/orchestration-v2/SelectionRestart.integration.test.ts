@@ -177,6 +177,7 @@ function makeRestartAdapter(
             });
             yield* Queue.offer(events, {
               type: "turn.terminal",
+              runAttemptId: active.input.attemptId,
               driver,
               providerThreadId: active.input.providerThread.id,
               providerTurnId: active.providerTurnId,
@@ -271,6 +272,7 @@ function makeRestartAdapter(
                 yield* Queue.offer(events, {
                   type: "provider_thread.updated",
                   driver,
+                  runAttemptId: active.input.attemptId,
                   providerThread: {
                     ...active.input.providerThread,
                     status: "idle",
@@ -371,6 +373,7 @@ function makeCompletingHandoffAdapter(startCount: Ref.Ref<number>): ProviderAdap
               });
               yield* Queue.offer(events, {
                 type: "turn.terminal",
+                runAttemptId: input.attemptId,
                 driver: handoffDriver,
                 providerThreadId: input.providerThread.id,
                 providerTurnId,

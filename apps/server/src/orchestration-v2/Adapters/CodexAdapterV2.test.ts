@@ -1993,10 +1993,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         ),
         Effect.forkScoped,
       );
-      if (runtime.hasPendingBackgroundWork === undefined) {
-        return yield* Effect.die("Codex adapter runtime must expose hasPendingBackgroundWork.");
+      if (runtime.getBackgroundWork === undefined) {
+        return yield* Effect.die("Codex adapter runtime must expose getBackgroundWork.");
       }
-      const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+      const hasPendingBackgroundWork = runtime.getBackgroundWork.pipe(
+        Effect.map((work) => work.pending),
+      );
       const terminalEvents = () =>
         events.filter(
           (event): event is Extract<ProviderAdapterV2Event, { type: "turn.terminal" }> =>

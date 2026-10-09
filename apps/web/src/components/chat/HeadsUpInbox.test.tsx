@@ -9,6 +9,7 @@ const state = vi.hoisted(() => ({
   view: "unresolved",
   pending: false,
   connected: true,
+  deniedEnvironment: null as EnvironmentId | null,
   acknowledged: false,
   revision: 0,
   listeners: new Set<() => void>(),
@@ -20,6 +21,10 @@ const state = vi.hoisted(() => ({
 }));
 vi.mock("@effect/atom-react", () => ({
   useAtomValue: () => AsyncResult.success({ phase: state.connected ? "connected" : "offline" }),
+}));
+vi.mock("../../state/session", () => ({
+  useEnvironmentScope: (environment: EnvironmentId) => environment !== state.deniedEnvironment,
+  readEnvironmentScope: (environment: EnvironmentId) => environment !== state.deniedEnvironment,
 }));
 vi.mock("../../connection/catalog", () => ({ environmentCatalog: { stateAtom: () => null } }));
 vi.mock("../../state/headsUpInbox", () => ({
@@ -129,6 +134,7 @@ beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   state.pending = false;
   state.connected = true;
+  state.deniedEnvironment = null;
   state.acknowledged = false;
   state.read.mockClear();
   state.resolve.mockReset().mockResolvedValue({ _tag: "Success" });
@@ -409,4 +415,26 @@ it("Ask preserves the draft and keeps the notice open if dismissal fails, then r
   ).toHaveLength(1);
   expect(state.draftReady).toHaveBeenCalledTimes(1);
   expect(document.querySelector('button[aria-controls="ysk-notice"]')).toBeNull();
+});
+
+it("read-only destination stays browsable without read acknowledgments or notice mutations", async () => {
+  state.deniedEnvironment = otherEnvironmentId;
+  await openInbox(otherEnvironmentId);
+  expect(state.read).not.toHaveBeenCalled();
+  for (const label of ["Dismiss", "Knew", "Ask agent · Draft"]) {
+    expect(button(label).disabled).toBe(true);
+    await act(async () => button(label).click());
+  }
+  await act(async () => button("reviewed (1)").click());
+  expect(button("Undo").disabled).toBe(true);
+  await act(async () => button("Undo").click());
+  expect(state.resolve).not.toHaveBeenCalled();
+  expect(state.draftReady).not.toHaveBeenCalled();
+  state.deniedEnvironment = null;
+  await render(otherEnvironmentId);
+  expect(state.read).toHaveBeenCalledWith({
+    environmentId: otherEnvironmentId,
+    input: { threadId, turnItemId: entry.turnItemId },
+  });
+  expect(button("Undo").disabled).toBe(false);
 });

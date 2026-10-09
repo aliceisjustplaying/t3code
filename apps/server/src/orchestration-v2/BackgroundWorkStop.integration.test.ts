@@ -406,6 +406,7 @@ const stopEarlierBackgroundWork = ({
         });
         yield* Queue.offer(events, {
           type: "turn.terminal",
+          runAttemptId: codexTurn.runAttemptId!,
           driver,
           providerThreadId: codexTurn.providerThreadId,
           providerTurnId: codexTurn.id,

@@ -91,6 +91,10 @@ export interface PiRpcSpawnOptions {
 export interface PiRpcConnection {
   /** Fire-and-forget write (used for `extension_ui_response`). */
   readonly send: (record: PiRpcRecord) => Effect.Effect<void, PiRpcError>;
+  /** Enqueue a command; its response enters events with this local owner metadata.
+   * No deadline: extension commands may await human input indefinitely.
+   */
+  readonly enqueue: (record: PiRpcRecord, owner: PiRpcRecord) => Effect.Effect<void, PiRpcError>;
   /**
    * Correlated request: assigns an `id`, waits for the matching response
    * record, and returns its `data` (undefined when the command carries none).
@@ -120,9 +124,9 @@ export interface PiRpcConnection {
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const TERMINATION_GRACE = Duration.seconds(1);
 
-interface PendingPiRequest {
-  readonly deferred: Deferred.Deferred<unknown, PiRpcError>;
-}
+type PendingPiRequest =
+  | { readonly deferred: Deferred.Deferred<unknown, PiRpcError> }
+  | { readonly owner: PiRpcRecord };
 
 const MAX_PI_RECORD_CHARS = 8 * 1024 * 1024;
 
@@ -294,7 +298,7 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
       if (!claimed) return;
       for (const [key, pending] of pendingRequests) {
         pendingRequests.delete(key);
-        yield* Deferred.fail(pending.deferred, error);
+        if ("deferred" in pending) yield* Deferred.fail(pending.deferred, error);
       }
       // Closing `outgoing` is what makes `send` non-racy: once the writer is
       // gone every later offer is refused rather than silently buffered.
@@ -308,7 +312,10 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
         const pending = pendingRequests.get(record["id"]);
         if (pending !== undefined) {
           pendingRequests.delete(record["id"]);
-          if (record["success"] === true) {
+          if ("owner" in pending) {
+            // Route here, not from an acknowledgement fiber: preserve stdout order.
+            yield* Queue.offer(events, { ...record, ...pending.owner });
+          } else if (record["success"] === true) {
             yield* Deferred.succeed(pending.deferred, record["data"]);
           } else {
             yield* Deferred.fail(
@@ -322,7 +329,7 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
           }
         }
         // A timed-out or interrupted request no longer has an owner. Its
-        // late reply must not enter the id-less prompt acknowledgement FIFO.
+        // late reply must not enter the session event pump.
         return;
       }
       if (record["type"] === "response" && record["id"] !== undefined) return;
@@ -444,17 +451,25 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
       }
     });
 
+  const enqueueRequest = (record: PiRpcRecord, pending: PendingPiRequest) =>
+    Effect.gen(function* () {
+      const id = `t3-${nextRequestId++}`;
+      pendingRequests.set(id, pending);
+      yield* send({ ...record, id }).pipe(
+        Effect.onExit((exit) =>
+          exit._tag === "Success" ? Effect.void : Effect.sync(() => pendingRequests.delete(id)),
+        ),
+      );
+      return id;
+    });
+
   const request = (
     record: PiRpcRecord,
     timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
   ): Effect.Effect<unknown, PiRpcError | PiRpcTimeoutError> =>
     Effect.gen(function* () {
-      const id = `t3-${nextRequestId++}`;
       const deferred = yield* Deferred.make<unknown, PiRpcError>();
-      pendingRequests.set(id, { deferred });
-      yield* send({ ...record, id }).pipe(
-        Effect.tapError(() => Effect.sync(() => pendingRequests.delete(id))),
-      );
+      const id = yield* enqueueRequest(record, { deferred });
       // Raced against the transport: a death that lands after this request was
       // registered (or between `send`'s check and its enqueue) would otherwise
       // leave the caller waiting out the full timeout for a reply that is
@@ -477,6 +492,7 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
 
   return {
     send,
+    enqueue: (record, owner) => enqueueRequest(record, { owner }).pipe(Effect.asVoid),
     request,
     events,
     exited: Deferred.await(exitDeferred),

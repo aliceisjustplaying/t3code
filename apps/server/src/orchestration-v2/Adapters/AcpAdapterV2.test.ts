@@ -3018,10 +3018,12 @@ describe("AcpAdapterV2", () => {
         modelSelection,
         runtimePolicy,
       });
-      if (runtime.hasPendingBackgroundWork === undefined) {
+      if (runtime.getBackgroundWork === undefined) {
         return yield* Effect.die("ACP runtime must expose background work state");
       }
-      const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+      const hasPendingBackgroundWork = runtime.getBackgroundWork.pipe(
+        Effect.map((work) => work.pending),
+      );
       const events = yield* Queue.unbounded<ProviderAdapterV2Event>();
       yield* runtime.events.pipe(
         Stream.runForEach((event) => Queue.offer(events, event)),
@@ -5554,12 +5556,14 @@ describe("AcpAdapterV2", () => {
           modelSelection,
           runtimePolicy,
         });
-        if (runtime.hasPendingBackgroundWork === undefined) {
+        if (runtime.getBackgroundWork === undefined) {
           return yield* Effect.die(
-            "ACP runtime must expose hasPendingBackgroundWork when post-settle continuation is enabled.",
+            "ACP runtime must expose getBackgroundWork when post-settle continuation is enabled.",
           );
         }
-        const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+        const hasPendingBackgroundWork = runtime.getBackgroundWork.pipe(
+          Effect.map((work) => work.pending),
+        );
         const events = yield* Queue.unbounded<ProviderAdapterV2Event>();
         yield* runtime.events.pipe(
           Stream.runForEach((event) => Queue.offer(events, event)),
@@ -5726,12 +5730,14 @@ describe("AcpAdapterV2", () => {
         modelSelection,
         runtimePolicy,
       });
-      if (runtime.hasPendingBackgroundWork === undefined) {
+      if (runtime.getBackgroundWork === undefined) {
         return yield* Effect.die(
-          "ACP runtime must expose hasPendingBackgroundWork when post-settle continuation is enabled.",
+          "ACP runtime must expose getBackgroundWork when post-settle continuation is enabled.",
         );
       }
-      const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+      const hasPendingBackgroundWork = runtime.getBackgroundWork.pipe(
+        Effect.map((work) => work.pending),
+      );
       const events = yield* Queue.unbounded<ProviderAdapterV2Event>();
       yield* runtime.events.pipe(
         Stream.runForEach((event) => Queue.offer(events, event)),
@@ -5977,12 +5983,14 @@ describe("AcpAdapterV2", () => {
             modelSelection,
             runtimePolicy,
           });
-          if (runtime.hasPendingBackgroundWork === undefined) {
+          if (runtime.getBackgroundWork === undefined) {
             return yield* Effect.die(
-              "ACP runtime must expose hasPendingBackgroundWork when post-settle continuation is enabled.",
+              "ACP runtime must expose getBackgroundWork when post-settle continuation is enabled.",
             );
           }
-          const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+          const hasPendingBackgroundWork = runtime.getBackgroundWork.pipe(
+            Effect.map((work) => work.pending),
+          );
           const events = yield* Queue.unbounded<ProviderAdapterV2Event>();
           yield* runtime.events.pipe(
             Stream.runForEach((event) => Queue.offer(events, event)),
@@ -6181,12 +6189,14 @@ describe("AcpAdapterV2", () => {
           modelSelection,
           runtimePolicy,
         });
-        if (runtime.hasPendingBackgroundWork === undefined) {
+        if (runtime.getBackgroundWork === undefined) {
           return yield* Effect.die(
-            "ACP runtime must expose hasPendingBackgroundWork when post-settle continuation is enabled.",
+            "ACP runtime must expose getBackgroundWork when post-settle continuation is enabled.",
           );
         }
-        const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+        const hasPendingBackgroundWork = runtime.getBackgroundWork.pipe(
+          Effect.map((work) => work.pending),
+        );
         const events = yield* Queue.unbounded<ProviderAdapterV2Event>();
         yield* runtime.events.pipe(
           Stream.runForEach((event) => Queue.offer(events, event)),
@@ -6372,10 +6382,12 @@ describe("AcpAdapterV2", () => {
         modelSelection,
         runtimePolicy,
       });
-      if (runtime.hasPendingBackgroundWork === undefined) {
-        return yield* Effect.die("post-settle continuation must expose hasPendingBackgroundWork");
+      if (runtime.getBackgroundWork === undefined) {
+        return yield* Effect.die("post-settle continuation must expose getBackgroundWork");
       }
-      const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+      const hasPendingBackgroundWork = runtime.getBackgroundWork.pipe(
+        Effect.map((work) => work.pending),
+      );
       const events = yield* Queue.unbounded<ProviderAdapterV2Event>();
       yield* runtime.events.pipe(
         Stream.runForEach((event) => Queue.offer(events, event)),
@@ -6544,12 +6556,14 @@ describe("AcpAdapterV2", () => {
         modelSelection,
         runtimePolicy,
       });
-      if (runtime.hasPendingBackgroundWork === undefined) {
+      if (runtime.getBackgroundWork === undefined) {
         return yield* Effect.die(
-          "ACP runtime must expose hasPendingBackgroundWork when post-settle continuation is enabled.",
+          "ACP runtime must expose getBackgroundWork when post-settle continuation is enabled.",
         );
       }
-      const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+      const hasPendingBackgroundWork = runtime.getBackgroundWork.pipe(
+        Effect.map((work) => work.pending),
+      );
       const events = yield* Queue.unbounded<ProviderAdapterV2Event>();
       yield* runtime.events.pipe(
         Stream.runForEach((event) => Queue.offer(events, event)),
@@ -6798,12 +6812,14 @@ describe("AcpAdapterV2", () => {
           modelSelection,
           runtimePolicy,
         });
-        if (runtime.hasPendingBackgroundWork === undefined) {
+        if (runtime.getBackgroundWork === undefined) {
           return yield* Effect.die(
-            "ACP runtime must expose hasPendingBackgroundWork when post-settle continuation is enabled.",
+            "ACP runtime must expose getBackgroundWork when post-settle continuation is enabled.",
           );
         }
-        const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+        const hasPendingBackgroundWork = runtime.getBackgroundWork.pipe(
+          Effect.map((work) => work.pending),
+        );
         const events = yield* Queue.unbounded<ProviderAdapterV2Event>();
         yield* runtime.events.pipe(
           Stream.runForEach((event) => Queue.offer(events, event)),
@@ -7096,12 +7112,14 @@ describe("AcpAdapterV2", () => {
           modelSelection,
           runtimePolicy,
         });
-        if (runtime.hasPendingBackgroundWork === undefined) {
+        if (runtime.getBackgroundWork === undefined) {
           return yield* Effect.die(
-            "ACP runtime must expose hasPendingBackgroundWork when post-settle continuation is enabled.",
+            "ACP runtime must expose getBackgroundWork when post-settle continuation is enabled.",
           );
         }
-        const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+        const hasPendingBackgroundWork = runtime.getBackgroundWork.pipe(
+          Effect.map((work) => work.pending),
+        );
         const events = yield* Queue.unbounded<ProviderAdapterV2Event>();
         yield* runtime.events.pipe(
           Stream.runForEach((event) => Queue.offer(events, event)),
@@ -7338,12 +7356,14 @@ describe("AcpAdapterV2", () => {
         modelSelection,
         runtimePolicy,
       });
-      if (runtime.hasPendingBackgroundWork === undefined) {
+      if (runtime.getBackgroundWork === undefined) {
         return yield* Effect.die(
-          "ACP runtime must expose hasPendingBackgroundWork when post-settle continuation is enabled.",
+          "ACP runtime must expose getBackgroundWork when post-settle continuation is enabled.",
         );
       }
-      const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+      const hasPendingBackgroundWork = runtime.getBackgroundWork.pipe(
+        Effect.map((work) => work.pending),
+      );
       const events = yield* Queue.unbounded<ProviderAdapterV2Event>();
       yield* runtime.events.pipe(
         Stream.runForEach((event) => Queue.offer(events, event)),
@@ -7557,12 +7577,14 @@ describe("AcpAdapterV2", () => {
           modelSelection,
           runtimePolicy,
         });
-        if (runtime.hasPendingBackgroundWork === undefined) {
+        if (runtime.getBackgroundWork === undefined) {
           return yield* Effect.die(
-            "ACP runtime must expose hasPendingBackgroundWork when post-settle continuation is enabled.",
+            "ACP runtime must expose getBackgroundWork when post-settle continuation is enabled.",
           );
         }
-        const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+        const hasPendingBackgroundWork = runtime.getBackgroundWork.pipe(
+          Effect.map((work) => work.pending),
+        );
         const events = yield* Queue.unbounded<ProviderAdapterV2Event>();
         yield* runtime.events.pipe(
           Stream.runForEach((event) => Queue.offer(events, event)),
@@ -7827,12 +7849,14 @@ describe("AcpAdapterV2", () => {
           modelSelection,
           runtimePolicy,
         });
-        if (runtime.hasPendingBackgroundWork === undefined) {
+        if (runtime.getBackgroundWork === undefined) {
           return yield* Effect.die(
-            "ACP runtime must expose hasPendingBackgroundWork when post-settle continuation is enabled.",
+            "ACP runtime must expose getBackgroundWork when post-settle continuation is enabled.",
           );
         }
-        const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+        const hasPendingBackgroundWork = runtime.getBackgroundWork.pipe(
+          Effect.map((work) => work.pending),
+        );
         const events = yield* Queue.unbounded<ProviderAdapterV2Event>();
         yield* runtime.events.pipe(
           Stream.runForEach((event) => Queue.offer(events, event)),
@@ -8320,12 +8344,14 @@ describe("AcpAdapterV2", () => {
           modelSelection,
           runtimePolicy,
         });
-        if (runtime.hasPendingBackgroundWork === undefined) {
+        if (runtime.getBackgroundWork === undefined) {
           return yield* Effect.die(
-            "ACP runtime must expose hasPendingBackgroundWork when post-settle continuation is enabled.",
+            "ACP runtime must expose getBackgroundWork when post-settle continuation is enabled.",
           );
         }
-        const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+        const hasPendingBackgroundWork = runtime.getBackgroundWork.pipe(
+          Effect.map((work) => work.pending),
+        );
         const events = yield* Queue.unbounded<ProviderAdapterV2Event>();
         yield* runtime.events.pipe(
           Stream.runForEach((event) => Queue.offer(events, event)),
@@ -8501,12 +8527,14 @@ describe("AcpAdapterV2", () => {
         modelSelection,
         runtimePolicy,
       });
-      if (runtime.hasPendingBackgroundWork === undefined) {
+      if (runtime.getBackgroundWork === undefined) {
         return yield* Effect.die(
-          "ACP runtime must expose hasPendingBackgroundWork when post-settle continuation is enabled.",
+          "ACP runtime must expose getBackgroundWork when post-settle continuation is enabled.",
         );
       }
-      const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+      const hasPendingBackgroundWork = runtime.getBackgroundWork.pipe(
+        Effect.map((work) => work.pending),
+      );
       const events = yield* Queue.unbounded<ProviderAdapterV2Event>();
       yield* runtime.events.pipe(
         Stream.runForEach((event) => Queue.offer(events, event)),
@@ -9106,12 +9134,14 @@ describe("AcpAdapterV2", () => {
         modelSelection,
         runtimePolicy,
       });
-      if (runtime.hasPendingBackgroundWork === undefined) {
+      if (runtime.getBackgroundWork === undefined) {
         return yield* Effect.die(
-          "ACP runtime must expose hasPendingBackgroundWork when post-settle continuation is enabled.",
+          "ACP runtime must expose getBackgroundWork when post-settle continuation is enabled.",
         );
       }
-      const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+      const hasPendingBackgroundWork = runtime.getBackgroundWork.pipe(
+        Effect.map((work) => work.pending),
+      );
       const events = yield* Queue.unbounded<ProviderAdapterV2Event>();
       yield* runtime.events.pipe(
         Stream.runForEach((event) => Queue.offer(events, event)),
@@ -9455,12 +9485,14 @@ describe("AcpAdapterV2", () => {
           modelSelection,
           runtimePolicy,
         });
-        if (runtime.hasPendingBackgroundWork === undefined) {
+        if (runtime.getBackgroundWork === undefined) {
           return yield* Effect.die(
-            "ACP runtime must expose hasPendingBackgroundWork when post-settle continuation is enabled.",
+            "ACP runtime must expose getBackgroundWork when post-settle continuation is enabled.",
           );
         }
-        const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+        const hasPendingBackgroundWork = runtime.getBackgroundWork.pipe(
+          Effect.map((work) => work.pending),
+        );
         const events = yield* Queue.unbounded<ProviderAdapterV2Event>();
         yield* runtime.events.pipe(
           Stream.runForEach((event) => Queue.offer(events, event)),
@@ -9714,12 +9746,14 @@ describe("AcpAdapterV2", () => {
         modelSelection,
         runtimePolicy,
       });
-      if (runtime.hasPendingBackgroundWork === undefined) {
+      if (runtime.getBackgroundWork === undefined) {
         return yield* Effect.die(
-          "ACP runtime must expose hasPendingBackgroundWork when post-settle continuation is enabled.",
+          "ACP runtime must expose getBackgroundWork when post-settle continuation is enabled.",
         );
       }
-      const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+      const hasPendingBackgroundWork = runtime.getBackgroundWork.pipe(
+        Effect.map((work) => work.pending),
+      );
       const events = yield* Queue.unbounded<ProviderAdapterV2Event>();
       yield* runtime.events.pipe(
         Stream.runForEach((event) => Queue.offer(events, event)),
@@ -11007,12 +11041,14 @@ describe("AcpAdapterV2", () => {
           modelSelection,
           runtimePolicy,
         });
-        if (runtime.hasPendingBackgroundWork === undefined) {
+        if (runtime.getBackgroundWork === undefined) {
           return yield* Effect.die(
-            "ACP runtime must expose hasPendingBackgroundWork when post-settle continuation is enabled.",
+            "ACP runtime must expose getBackgroundWork when post-settle continuation is enabled.",
           );
         }
-        const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+        const hasPendingBackgroundWork = runtime.getBackgroundWork.pipe(
+          Effect.map((work) => work.pending),
+        );
         const events = yield* Queue.unbounded<ProviderAdapterV2Event>();
         yield* runtime.events.pipe(
           Stream.runForEach((event) => Queue.offer(events, event)),
@@ -11514,12 +11550,14 @@ describe("AcpAdapterV2", () => {
         modelSelection,
         runtimePolicy,
       });
-      if (runtime.hasPendingBackgroundWork === undefined) {
+      if (runtime.getBackgroundWork === undefined) {
         return yield* Effect.die(
-          "ACP runtime must expose hasPendingBackgroundWork when post-settle continuation is enabled.",
+          "ACP runtime must expose getBackgroundWork when post-settle continuation is enabled.",
         );
       }
-      const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+      const hasPendingBackgroundWork = runtime.getBackgroundWork.pipe(
+        Effect.map((work) => work.pending),
+      );
       const events = yield* Queue.unbounded<ProviderAdapterV2Event>();
       yield* runtime.events.pipe(
         Stream.runForEach((event) => Queue.offer(events, event)),
@@ -13849,7 +13887,7 @@ describe("AcpAdapterV2", () => {
         "interrupted commands must not retain a mid-stream exit_code 0",
       );
       assert.isFalse(runningMonitorAfterInterrupt);
-      assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
+      assert.isFalse(yield* runtime.getBackgroundWork!.pipe(Effect.map((work) => work.pending)));
       assert.isFalse(
         lateAfterCancelSeen,
         "late post-Stop assistant text must not attach to the stopped run",

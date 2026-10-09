@@ -263,7 +263,7 @@ function makeDeterministicAdapter(input: {
               ]);
               const eventTime = yield* DateTime.now;
               const providerTurnId = ProviderTurnId.make(
-                `provider-turn:${input.instanceId}:${turnInput.threadId}:${turnInput.runOrdinal}`,
+                `provider-turn:${input.instanceId}:${turnInput.threadId}:${turnInput.attemptId}`,
               );
               runOrdinals.set(providerTurnId, turnInput.runOrdinal);
               turnInputs.set(providerTurnId, turnInput);
@@ -278,7 +278,7 @@ function makeDeterministicAdapter(input: {
                     runAttemptId: turnInput.attemptId,
                     nativeTurnRef: {
                       driver: input.driver,
-                      nativeId: `native-turn:${turnInput.threadId}:${turnInput.runOrdinal}`,
+                      nativeId: `native-turn:${turnInput.threadId}:${turnInput.attemptId}`,
                       strength: "strong",
                     },
                     ordinal: turnInput.providerTurnOrdinal,
@@ -306,7 +306,7 @@ function makeDeterministicAdapter(input: {
                     runAttemptId: turnInput.attemptId,
                     nativeTurnRef: {
                       driver: input.driver,
-                      nativeId: `native-turn:${turnInput.threadId}:${turnInput.runOrdinal}`,
+                      nativeId: `native-turn:${turnInput.threadId}:${turnInput.attemptId}`,
                       strength: "strong",
                     },
                     ordinal: turnInput.providerTurnOrdinal,
@@ -320,7 +320,7 @@ function makeDeterministicAdapter(input: {
                   driver: input.driver,
                   turnItem: {
                     id: TurnItemId.make(
-                      `turn-item:${input.instanceId}:${turnInput.threadId}:${turnInput.runOrdinal}:assistant`,
+                      `turn-item:${input.instanceId}:${turnInput.threadId}:${turnInput.attemptId}:assistant`,
                     ),
                     threadId: turnInput.threadId,
                     runId: turnInput.runId,
@@ -329,7 +329,7 @@ function makeDeterministicAdapter(input: {
                     providerTurnId,
                     nativeItemRef: null,
                     parentItemId: null,
-                    ordinal: turnInput.runOrdinal * 100 + 1,
+                    ordinal: turnInput.providerTurnOrdinal * 100 + 1,
                     status: "completed",
                     title: null,
                     startedAt: eventTime,
@@ -337,7 +337,7 @@ function makeDeterministicAdapter(input: {
                     updatedAt: eventTime,
                     type: "assistant_message",
                     messageId: MessageId.make(
-                      `message:${input.instanceId}:${turnInput.threadId}:${turnInput.runOrdinal}:assistant`,
+                      `message:${input.instanceId}:${turnInput.threadId}:${turnInput.attemptId}:assistant`,
                     ),
                     text: response,
                     streaming: false,
@@ -345,6 +345,7 @@ function makeDeterministicAdapter(input: {
                 },
                 {
                   type: "turn.terminal",
+                  runAttemptId: turnInput.attemptId,
                   driver: input.driver,
                   providerThreadId: turnInput.providerThread.id,
                   providerTurnId,
@@ -359,6 +360,7 @@ function makeDeterministicAdapter(input: {
           interruptTurn: ({ providerThread, providerTurnId }) =>
             Effect.gen(function* () {
               const turnInput = turnInputs.get(providerTurnId);
+              if (turnInput === undefined) return;
               const completedAt = yield* DateTime.now;
               if (turnInput !== undefined) {
                 yield* publish([
@@ -372,7 +374,7 @@ function makeDeterministicAdapter(input: {
                       runAttemptId: turnInput.attemptId,
                       nativeTurnRef: {
                         driver: input.driver,
-                        nativeId: `native-turn:${turnInput.threadId}:${turnInput.runOrdinal}`,
+                        nativeId: `native-turn:${turnInput.threadId}:${turnInput.attemptId}`,
                         strength: "strong",
                       },
                       ordinal: turnInput.providerTurnOrdinal,
@@ -386,6 +388,7 @@ function makeDeterministicAdapter(input: {
               yield* publish([
                 {
                   type: "turn.terminal",
+                  runAttemptId: turnInput.attemptId,
                   driver: input.driver,
                   providerThreadId: providerThread.id,
                   providerTurnId,
@@ -1573,21 +1576,28 @@ describe("orchestrator MCP toolkit", () => {
               placeholder: "Paste the webhook secret",
               clientRequestId: "release-webhook-secret",
             }).pipe(Effect.forkChild);
-            // Polled without the helper's short budget: under load the tool's
-            // own reads come first.
-            const asked = yield* Effect.gen(function* () {
-              while (true) {
-                const projection = yield* orchestrator.getThreadProjection(parentThreadId);
-                if (
-                  projection.turnItems.some(
-                    (item) => item.type === "secret_request" && item.secretStatus === "pending",
-                  )
-                ) {
-                  return projection;
-                }
-                yield* Effect.sleep("5 millis");
-              }
-            });
+            // A rejected tool call cannot create a card. Surface that result instead
+            // of hiding it behind an unbounded wait for a pending secret request.
+            const asked = yield* waitForProjection(
+              orchestrator,
+              parentThreadId,
+              (projection) =>
+                projection.turnItems.some(
+                  (item) => item.type === "secret_request" && item.secretStatus === "pending",
+                ),
+            ).pipe(
+              Effect.raceFirst(
+                Fiber.join(secretFiber).pipe(
+                  Effect.flatMap((result) =>
+                    Effect.die(
+                      new Error(
+                        `Secret request returned before its pending card: ${JSON.stringify(result)}`,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            );
             const card = asked.turnItems.find((item) => item.type === "secret_request");
             if (card?.type !== "secret_request") {
               return yield* Effect.die(new Error("Secret request card missing."));

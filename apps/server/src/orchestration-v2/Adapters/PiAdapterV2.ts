@@ -105,7 +105,7 @@ const decodeJob = Schema.decodeUnknownOption(OrchestrationV2Job);
 const decodeJobJson = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 const PiBackgroundWork = Schema.Struct({ pending: Schema.Boolean, retained: Schema.Boolean });
 const decodeBackgroundWorkJson = Schema.decodeUnknownEffect(
-  Schema.fromJsonString(PiBackgroundWork),
+  Schema.fromJsonString(Schema.Struct({ probeId: Schema.String, ...PiBackgroundWork.fields })),
 );
 const unknownBackgroundWork = { pending: true, retained: false };
 
@@ -496,7 +496,10 @@ export function makePiAdapterV2(
       // dialog's own resolution updates.
       const sessionEventPermit = yield* Semaphore.make(1);
       let threadState: PiThreadState | null = null;
-      let backgroundProbe: Deferred.Deferred<typeof PiBackgroundWork.Type> | undefined;
+      let backgroundProbe:
+        | { id: string; deferred: Deferred.Deferred<typeof PiBackgroundWork.Type> }
+        | undefined;
+      let nextBackgroundProbeId = 0;
       const backgroundProbePermit = yield* Semaphore.make(1);
       let noticeOrdinal = 0;
       const jobs = new Map<string, Extract<OrchestrationV2TurnItem, { type: "system_notice" }>>();
@@ -561,17 +564,6 @@ export function makePiAdapterV2(
       let contextWindow: number | null = null;
       const modelContextWindows = new Map<string, number>();
       let modelsDiscovered = false;
-      // Prompts sent through connection.send omit an id. Keep their send order and
-      // owner so a late ack from a settled turn cannot affect the next turn.
-      const pendingPromptResponses: Array<{
-        readonly providerTurnId: OrchestrationV2ProviderTurn["id"];
-        readonly kind: "turn_start" | "steer";
-      }> = [];
-      const pendingCompactResponses: Array<{
-        readonly providerTurnId: OrchestrationV2ProviderTurn["id"];
-        readonly kind: "turn_start" | "steer";
-      }> = [];
-
       const compactRpcRecord = (command: PiCompactCommand): PiRpcRecord =>
         command.customInstructions === undefined
           ? { type: "compact" }
@@ -1337,15 +1329,15 @@ export function makePiAdapterV2(
           return;
         }
         if (method === "setStatus" && recordString(event, "statusKey") === "t3:background-work") {
-          if (backgroundProbe !== undefined) {
+          const probe = backgroundProbe;
+          if (probe !== undefined) {
             const text = recordString(event, "statusText");
-            const work =
-              text === "pending" || text === "idle"
-                ? { pending: text === "pending", retained: false }
-                : yield* decodeBackgroundWorkJson(text).pipe(
-                    Effect.orElseSucceed(() => unknownBackgroundWork),
-                  );
-            yield* Deferred.succeed(backgroundProbe, work);
+            const work = yield* decodeBackgroundWorkJson(text).pipe(
+              Effect.orElseSucceed(() => null),
+            );
+            if (backgroundProbe === probe && work?.probeId === probe.id) {
+              yield* Deferred.succeed(probe.deferred, work);
+            }
           }
           return;
         }
@@ -1739,6 +1731,7 @@ export function makePiAdapterV2(
           }
           yield* emit({
             type: "turn.terminal",
+            runAttemptId: turn.turnInput.attemptId,
             driver: PI_PROVIDER,
             providerThreadId: state.providerThread.id,
             providerTurnId: turn.providerTurn.id,
@@ -1757,6 +1750,7 @@ export function makePiAdapterV2(
         } else {
           yield* emit({
             type: "turn.terminal",
+            runAttemptId: turn.turnInput.attemptId,
             driver: PI_PROVIDER,
             providerThreadId: state.providerThread.id,
             providerTurnId: turn.providerTurn.id,
@@ -1800,7 +1794,7 @@ export function makePiAdapterV2(
 
       // Completion blockers include held/unconsumed wakes. Retained services
       // keep the native runtime alive without entering the completion roster.
-      // Status replies have no request ID, so serialize probes. The event pump
+      // Correlate status replies as well as command acks. The event pump
       // must remain free to receive the reply while a probe awaits it.
       const probeBackgroundWork = backgroundProbePermit.withPermits(1)(
         Effect.gen(function* () {
@@ -1821,8 +1815,9 @@ export function makePiAdapterV2(
           if (sessionClosed || replacingNativeSession || generation !== wakeGeneration)
             return unknownBackgroundWork;
           const probe = yield* Deferred.make<typeof PiBackgroundWork.Type>();
-          backgroundProbe = probe;
-          yield* request({ type: "prompt", message: "/t3-background-work" }, 2_000);
+          const probeId = String(nextBackgroundProbeId++);
+          backgroundProbe = { id: probeId, deferred: probe };
+          yield* request({ type: "prompt", message: `/t3-background-work ${probeId}` }, 2_000);
           const work = yield* Deferred.await(probe);
           // Idle lifecycle changes have no turn settlement to refresh this row.
           // Do not apply an old snapshot across a new turn or thread switch.
@@ -1929,7 +1924,7 @@ export function makePiAdapterV2(
               if (!isCurrent()) return;
               held.dropped = true;
               if (wake === held) wake = null;
-              yield* connection.send({ type: "abort" }).pipe(Effect.ignore);
+              yield* connection.enqueue({ type: "abort" }, {}).pipe(Effect.ignore);
             }),
         });
       });
@@ -2223,17 +2218,17 @@ export function makePiAdapterV2(
             return;
           }
           case "response": {
-            // Correlated responses never reach the pump; an id-less response
-            // is the deferred ack of a fire-and-forget prompt/steer/compact.
+            // PiRpc attaches the original owner before enqueuing the acknowledgement.
             const command = recordString(event, "command");
+            const owner = recordField(event, "owner");
+            const ownerTurnId = recordString(owner, "providerTurnId");
+            const kind = recordString(owner, "kind");
             if (command === "compact") {
-              const pendingCompact = pendingCompactResponses.shift();
-              const compactTurn =
-                pendingCompact?.providerTurnId === turn?.providerTurn.id ? turn : null;
+              const compactTurn = ownerTurnId === turn?.providerTurn.id ? turn : null;
               if (compactTurn !== null) compactTurn.manualCompactInFlight = false;
               if (event["success"] === true) {
                 if (
-                  pendingCompact?.kind === "turn_start" &&
+                  kind === "turn_start" &&
                   compactTurn !== null &&
                   compactTurn.promptMayBeCommandOnly &&
                   !compactTurn.sawAgentActivity
@@ -2245,7 +2240,7 @@ export function makePiAdapterV2(
               if (event["success"] !== false) return;
               if (compactTurn === null) return;
               if (compactTurn.activeCompaction !== null) return;
-              if (pendingCompact?.kind === "steer") {
+              if (kind === "steer") {
                 yield* Effect.logWarning("Pi rejected a compact steer.", {
                   errorLength: recordString(event, "error")?.length,
                 });
@@ -2264,11 +2259,9 @@ export function makePiAdapterV2(
               }
               return;
             }
-            const pendingPrompt = command === "prompt" ? pendingPromptResponses.shift() : undefined;
-            const responseTurn =
-              pendingPrompt?.providerTurnId === turn?.providerTurn.id ? turn : null;
+            const responseTurn = ownerTurnId === turn?.providerTurn.id ? turn : null;
             const takenRunTurn =
-              pendingPrompt?.kind === "turn_start" && responseTurn?.awaitingPromptAck === true
+              kind === "turn_start" && responseTurn?.awaitingPromptAck === true
                 ? responseTurn
                 : null;
             if (takenRunTurn !== null) takenRunTurn.awaitingPromptAck = false;
@@ -2289,7 +2282,7 @@ export function makePiAdapterV2(
               // re-queued behind any events Pi emitted before answering
               // get_state, which keeps the check stream-ordered.
               if (
-                pendingPrompt?.kind === "turn_start" &&
+                kind === "turn_start" &&
                 responseTurn !== null &&
                 responseTurn.promptMayBeCommandOnly &&
                 !responseTurn.sawAgentActivity
@@ -2299,7 +2292,7 @@ export function makePiAdapterV2(
               return;
             }
             if (event["success"] !== false) return;
-            if (command === "steer" || pendingPrompt?.kind === "steer") {
+            if (command === "steer" || kind === "steer") {
               // A rejected steer only means that one message was refused. The
               // turn it was aimed at is still running on Pi, so terminalizing
               // here would report a failure while output keeps streaming.
@@ -2309,7 +2302,7 @@ export function makePiAdapterV2(
               return;
             }
             const failedTurn =
-              command === "prompt" && pendingPrompt?.kind === "turn_start"
+              command === "prompt" && kind === "turn_start"
                 ? responseTurn
                 : command === "parse"
                   ? turn
@@ -2688,26 +2681,22 @@ export function makePiAdapterV2(
           return sessionEntity;
         },
         events: Stream.fromQueue(events),
-        hasRetainedBackgroundServices: probeBackgroundWork.pipe(
-          Effect.map((work) => work.retained),
-        ),
-        hasPendingBackgroundWork: Effect.gen(function* () {
+        getBackgroundWork: Effect.gen(function* () {
           const work = yield* probeBackgroundWork;
-          const state = yield* request({ type: "get_state" }, 2_000);
-          return (
-            work.pending ||
-            wake !== null ||
-            recordField(state, "isStreaming") === true ||
-            recordField(state, "isCompacting") === true ||
-            (recordNumber(state, "pendingMessageCount") ?? 0) > 0
+          const state = yield* request({ type: "get_state" }, 2_000).pipe(
+            Effect.orElseSucceed(() => null),
           );
-        }).pipe(
-          Effect.timeoutOrElse({
-            duration: Duration.seconds(5),
-            orElse: () => Effect.succeed(true),
-          }),
-          Effect.catchCause(() => Effect.succeed(true)),
-        ),
+          return {
+            retained: work.retained,
+            pending:
+              work.pending ||
+              state === null ||
+              wake !== null ||
+              recordField(state, "isStreaming") === true ||
+              recordField(state, "isCompacting") === true ||
+              (recordNumber(state, "pendingMessageCount") ?? 0) > 0,
+          };
+        }),
         getModelContextWindow: (selection) => {
           if (selection.instanceId !== options.instanceId) return undefined;
           const slug =
@@ -2860,25 +2849,22 @@ export function makePiAdapterV2(
             yield* Effect.gen(function* () {
               state.activeTurn = activeTurn;
               if (compactCommand !== null) {
-                yield* connection.send(compactRpcRecord(compactCommand));
-                pendingCompactResponses.push({
-                  providerTurnId: providerTurn.id,
-                  kind: "turn_start",
+                yield* connection.enqueue(compactRpcRecord(compactCommand), {
+                  owner: { providerTurnId: providerTurn.id, kind: "turn_start" },
                 });
               } else if (payload !== null) {
                 // An extension can already be streaming when the turn starts.
                 // Pi rejects a bare prompt then; steer joins that run, and an
                 // idle Pi ignores streamingBehavior.
-                yield* connection.send({
-                  type: "prompt",
-                  message: payload.message,
-                  streamingBehavior: "steer",
-                  ...(payload.images.length === 0 ? {} : { images: payload.images }),
-                });
-                pendingPromptResponses.push({
-                  providerTurnId: providerTurn.id,
-                  kind: "turn_start",
-                });
+                yield* connection.enqueue(
+                  {
+                    type: "prompt",
+                    message: payload.message,
+                    streamingBehavior: "steer",
+                    ...(payload.images.length === 0 ? {} : { images: payload.images }),
+                  },
+                  { owner: { providerTurnId: providerTurn.id, kind: "turn_start" } },
+                );
               }
               yield* emit({
                 type: "provider_turn.updated",
@@ -2962,22 +2948,19 @@ export function makePiAdapterV2(
                 }
                 if (compactCommand !== null) {
                   turn.manualCompactInFlight = true;
-                  yield* connection.send(compactRpcRecord(compactCommand));
-                  pendingCompactResponses.push({
-                    providerTurnId: turn.providerTurn.id,
-                    kind: "steer",
+                  yield* connection.enqueue(compactRpcRecord(compactCommand), {
+                    owner: { providerTurnId: turn.providerTurn.id, kind: "steer" },
                   });
                 } else if (payload !== null) {
-                  yield* connection.send({
-                    type: "prompt",
-                    message: payload.message,
-                    streamingBehavior: "steer",
-                    ...(payload.images.length === 0 ? {} : { images: payload.images }),
-                  });
-                  pendingPromptResponses.push({
-                    providerTurnId: turn.providerTurn.id,
-                    kind: "steer",
-                  });
+                  yield* connection.enqueue(
+                    {
+                      type: "prompt",
+                      message: payload.message,
+                      streamingBehavior: "steer",
+                      ...(payload.images.length === 0 ? {} : { images: payload.images }),
+                    },
+                    { owner: { providerTurnId: turn.providerTurn.id, kind: "steer" } },
+                  );
                 }
                 turn.settleProbeGeneration += 1;
               }),

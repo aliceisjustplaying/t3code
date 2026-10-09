@@ -14,6 +14,9 @@ import { createRoot, type Root } from "react-dom/client";
 
 const state = vi.hoisted(() => ({
   items: [] as OrchestrationV2TurnItem[],
+  detail: null as OrchestrationV2TurnItem | null,
+  deniedEnvironment: null as EnvironmentId | null,
+  stop: vi.fn(async (_input: unknown) => ({ _tag: "Success" })),
   first: {
     items: [] as OrchestrationV2TurnItem[],
     nextCursor: null as { ordinal: number; itemId: TurnItemId } | null,
@@ -42,15 +45,20 @@ vi.mock("../../state/query", () => ({
 }));
 vi.mock("../../state/queries", () => ({
   useTurnItemDetail: () => {
-    throw new Error("Job output must not load while only the list is open");
+    if (!state.detail) throw new Error("Job output must not load while only the list is open");
+    return { data: { item: state.detail }, isPending: false, error: null, refresh: () => {} };
   },
 }));
 vi.mock("../../state/entities", () => ({
   useThreadProjection: () => ({ projection: { turnItems: state.items } }),
 }));
+vi.mock("../../state/session", () => ({
+  useEnvironmentScope: (environment: EnvironmentId) => environment !== state.deniedEnvironment,
+  readEnvironmentScope: (environment: EnvironmentId) => environment !== state.deniedEnvironment,
+}));
 vi.mock("../../state/threads", () => ({ threadEnvironment: { stopJob: null } }));
-vi.mock("../../state/use-atom-command", () => ({ useAtomCommand: () => vi.fn() }));
-import { ThreadJobsPanel } from "./ThreadJobsPanel";
+vi.mock("../../state/use-atom-command", () => ({ useAtomCommand: () => state.stop }));
+import { ThreadJobDetails, ThreadJobsPanel } from "./ThreadJobsPanel";
 const threadId = ThreadId.make("thread");
 function item(index: number, status: OrchestrationV2Job["state"]): OrchestrationV2TurnItem {
   const at = DateTime.makeUnsafe(index * 1000);
@@ -94,6 +102,9 @@ afterEach(async () => {
   if (root) await act(async () => root!.unmount());
   container?.remove();
   vi.unstubAllGlobals();
+  state.detail = null;
+  state.deniedEnvironment = null;
+  state.stop.mockClear();
 });
 it("starts collapsed, toggles jobs and loads older summaries in their destination environment", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -158,4 +169,49 @@ it("starts collapsed, toggles jobs and loads older summaries in their destinatio
   expect(sectionToggle().textContent).toContain("Jobs (6)");
   await act(async () => sectionToggle().click());
   expect(names()).toEqual(["Job 6", "Job 5", "Job 4", "Job 3", "Job 2"]);
+});
+
+it("job stop uses the destination grant and rechecks it when confirming", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const environmentId = EnvironmentId.make("destination");
+  const job = item(1, "running");
+  state.detail = job;
+  state.items = [job];
+  state.deniedEnvironment = environmentId;
+  container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
+  const render = () =>
+    act(async () =>
+      root!.render(
+        <ThreadJobDetails
+          environmentId={environmentId}
+          threadId={threadId}
+          itemId={job.id}
+          onClose={() => {}}
+        />,
+      ),
+    );
+  await render();
+  const stopButton = () =>
+    [...container!.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.textContent === "Stop job",
+    )!;
+  expect(stopButton().disabled).toBe(true);
+  state.deniedEnvironment = null;
+  await render();
+  await act(async () => stopButton().click());
+  const confirm = [
+    ...document.querySelectorAll<HTMLButtonElement>('[role="alertdialog"] button'),
+  ].find((button) => button.textContent === "Stop job")!;
+  // Permission can change after the dialog opens, before React receives an update.
+  state.deniedEnvironment = environmentId;
+  await act(async () => confirm.click());
+  expect(state.stop).not.toHaveBeenCalled();
+  state.deniedEnvironment = null;
+  await act(async () => confirm.click());
+  expect(state.stop).toHaveBeenCalledWith({
+    environmentId,
+    input: { threadId, turnItemId: job.id },
+  });
 });

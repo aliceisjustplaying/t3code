@@ -16,7 +16,7 @@ import {
   RunId,
   ProviderSessionId,
   type ProviderTurnId,
-  type RunAttemptId,
+  RunAttemptId,
   type OrchestrationV2Run,
   type OrchestrationV2TurnItem,
   ProviderDriverKind,
@@ -126,6 +126,7 @@ const layerFlakyReleaseEventSink = (flaky: FlakyReleaseWrites) =>
             );
             if (
               flaky.pauseRosterWrites !== undefined &&
+              !fails &&
               input.releasedProviderThreadOwner !== undefined
             ) {
               yield* Deferred.succeed(flaky.pauseRosterWrites.paused, undefined);
@@ -361,8 +362,7 @@ function makeProviderAdapter(
       readonly providerSessionId: ProviderSessionId;
       readonly initialProviderItemIdentityVersion?: 2;
     }) => Effect.Effect<void>;
-    readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
-    readonly hasRetainedBackgroundServices?: Effect.Effect<boolean>;
+    readonly getBackgroundWork?: ProviderAdapterV2SessionRuntime["getBackgroundWork"];
     readonly hasPendingBackgroundWorkForThread?: Effect.Effect<boolean>;
     readonly hangSessionScopeClose?: boolean;
     readonly startTurn?: Effect.Effect<void>;
@@ -450,12 +450,9 @@ function makeProviderAdapter(
                 }),
               )
             : Stream.fromQueue(events),
-          ...(options.hasPendingBackgroundWork === undefined
+          ...(options.getBackgroundWork === undefined
             ? {}
-            : { hasPendingBackgroundWork: options.hasPendingBackgroundWork }),
-          ...(options.hasRetainedBackgroundServices === undefined
-            ? {}
-            : { hasRetainedBackgroundServices: options.hasRetainedBackgroundServices }),
+            : { getBackgroundWork: options.getBackgroundWork }),
           ...(options.hasPendingBackgroundWorkForThread === undefined
             ? {}
             : {
@@ -518,8 +515,7 @@ function layerTest(input: {
     readonly armed: Ref.Ref<boolean>;
     readonly paused: Deferred.Deferred<void>;
   };
-  readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
-  readonly hasRetainedBackgroundServices?: Effect.Effect<boolean>;
+  readonly getBackgroundWork?: ProviderAdapterV2SessionRuntime["getBackgroundWork"];
   readonly hasPendingBackgroundWorkForThread?: Effect.Effect<boolean>;
   readonly hangSessionScopeClose?: boolean;
   readonly startTurn?: Effect.Effect<void>;
@@ -553,12 +549,9 @@ function layerTest(input: {
       ...(input.capabilities === undefined ? {} : { capabilities: input.capabilities }),
       ...(input.mcpConfigs === undefined ? {} : { mcpConfigs: input.mcpConfigs }),
       ...(input.beforeOpen === undefined ? {} : { beforeOpen: input.beforeOpen }),
-      ...(input.hasPendingBackgroundWork === undefined
+      ...(input.getBackgroundWork === undefined
         ? {}
-        : { hasPendingBackgroundWork: input.hasPendingBackgroundWork }),
-      ...(input.hasRetainedBackgroundServices === undefined
-        ? {}
-        : { hasRetainedBackgroundServices: input.hasRetainedBackgroundServices }),
+        : { getBackgroundWork: input.getBackgroundWork }),
       ...(input.hasPendingBackgroundWorkForThread === undefined
         ? {}
         : { hasPendingBackgroundWorkForThread: input.hasPendingBackgroundWorkForThread }),
@@ -1646,6 +1639,10 @@ it.effect(
         assert.isDefined(queue);
         yield* Queue.offer(queue!, {
           type: "turn.terminal",
+          runAttemptId: idAllocator.derive.runAttempt({
+            runId: idAllocator.derive.run({ threadId: threadA, ordinal: 1 }),
+            attemptOrdinal: 1,
+          }),
           driver: CODEX_DRIVER,
           providerThreadId: providerThreadOf(threadA).id,
           providerTurnId: idAllocator.derive.providerTurn({
@@ -1841,6 +1838,7 @@ it.effect("ProviderSessionManagerV2 drains subscribers when the provider stops",
       });
       yield* Queue.offer(adapterQueue!, {
         type: "turn.terminal",
+        runAttemptId: RunAttemptId.make("provider-stop-attempt"),
         driver: CODEX_DRIVER,
         providerThreadId,
         providerTurnId,
@@ -2851,7 +2849,9 @@ it.effect("ProviderSessionManagerV2 defers idle release while background work is
         layerTest({
           state,
           idleTimeoutMs: 1000,
-          hasPendingBackgroundWork: Ref.get(pendingWork),
+          getBackgroundWork: Ref.get(pendingWork).pipe(
+            Effect.map((pending) => ({ pending, retained: false })),
+          ),
         }),
       ),
     );
@@ -2951,7 +2951,7 @@ it.effect("ProviderSessionManagerV2 releases pinned idle sessions once the pin c
           state,
           idleTimeoutMs: 1000,
           maxIdlePinMs: 3000,
-          hasPendingBackgroundWork: Effect.succeed(true),
+          getBackgroundWork: Effect.succeed({ pending: true, retained: false }),
         }),
       ),
     );
@@ -2988,8 +2988,7 @@ it.effect(
             state,
             idleTimeoutMs: 1000,
             maxIdlePinMs: 3000,
-            hasPendingBackgroundWork: Effect.succeed(false),
-            hasRetainedBackgroundServices: Effect.succeed(true),
+            getBackgroundWork: Effect.succeed({ pending: false, retained: true }),
           }),
         ),
       );
@@ -3092,6 +3091,7 @@ it.effect(
         );
         yield* Queue.offer(queue!, {
           type: "turn.terminal",
+          runAttemptId: attemptId,
           driver: CODEX_DRIVER,
           providerThreadId: providerThread.id,
           providerTurnId,
@@ -3114,13 +3114,13 @@ it.effect(
             // Uninterruptible so the markBusy-triggered interrupt cannot land
             // inside the check, mirroring an adapter that masks interruption
             // while inspecting its own state.
-            hasPendingBackgroundWork: Effect.uninterruptible(
+            getBackgroundWork: Effect.uninterruptible(
               Effect.gen(function* () {
                 if (yield* Ref.getAndSet(firstCheck, false)) {
                   yield* Deferred.succeed(checkEntered, undefined);
                   yield* Deferred.await(checkGate);
                 }
-                return false;
+                return { pending: false, retained: false };
               }),
             ),
           }),
@@ -3129,7 +3129,7 @@ it.effect(
     }),
 );
 
-it.effect.each(["hasPendingBackgroundWork", "hasRetainedBackgroundServices"] as const)(
+it.effect.each(["pending", "retained"] as const)(
   "ProviderSessionManagerV2 does not apply a stale %s idle pin to a replacement session",
   (probe) =>
     Effect.gen(function* () {
@@ -3208,14 +3208,14 @@ it.effect.each(["hasPendingBackgroundWork", "hasRetainedBackgroundServices"] as 
             state,
             idleTimeoutMs: 1000,
             maxIdlePinMs: 60_000,
-            [probe]: Effect.uninterruptible(
+            getBackgroundWork: Effect.uninterruptible(
               Effect.gen(function* () {
                 if (yield* Ref.getAndSet(firstCheck, false)) {
                   yield* Deferred.succeed(checkEntered, undefined);
                   yield* Deferred.await(checkGate);
-                  return true;
+                  return { pending: probe === "pending", retained: probe === "retained" };
                 }
-                return false;
+                return { pending: false, retained: false };
               }),
             ),
           }),
@@ -3303,6 +3303,7 @@ it.effect(
         );
         yield* Queue.offer(queue!, {
           type: "turn.terminal",
+          runAttemptId: attemptId,
           driver: CODEX_DRIVER,
           providerThreadId: providerThread.id,
           providerTurnId,
@@ -3559,13 +3560,16 @@ it.effect("ProviderSessionManagerV2 retries release records that failed to persi
 );
 
 it.effect.each([false, true])(
-  "ProviderSessionManagerV2 release retries preserve replacement status and clean only old rosters (updated: %s)",
+  "ProviderSessionManagerV2 release retries preserve replacement status and clean only old rosters and jobs (updated: %s)",
   (updated) =>
     Effect.gen(function* () {
       const state = yield* Ref.make(emptyState);
+      const paused = yield* Deferred.make<void>();
+      const resume = yield* Deferred.make<void>();
       const flaky: FlakyReleaseWrites = {
         failing: yield* Ref.make<"none" | "session" | "session-and-requests">("none"),
         failures: yield* Queue.unbounded<void>(),
+        pauseRosterWrites: { paused, resume },
       };
       const effect = Effect.gen(function* () {
         const eventSink = yield* EventSink.EventSinkV2;
@@ -3573,6 +3577,7 @@ it.effect.each([false, true])(
         const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
         const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
         const threadId = ThreadId.make("thread-provider-session-manager-release-replacement");
+        const parentId = ThreadId.make("release-replacement-parent");
         const providerSessionId = yield* idAllocator.allocate.providerSession({
           providerInstanceId: modelSelection.instanceId,
           threadId,
@@ -3589,11 +3594,103 @@ it.effect.each([false, true])(
           yield* eventSink.write({ events: request.events });
           return request.requestId;
         });
+        const created = yield* makeThreadCreatedEvent({
+          idAllocator,
+          threadId,
+          now: yield* DateTime.now,
+        });
         yield* eventSink.write({
           events: [
-            yield* makeThreadCreatedEvent({ idAllocator, threadId, now: yield* DateTime.now }),
+            yield* makeThreadCreatedEvent({
+              idAllocator,
+              threadId: parentId,
+              now: yield* DateTime.now,
+            }),
+            {
+              ...created,
+              payload: {
+                ...created.payload,
+                lineage: {
+                  parentThreadId: parentId,
+                  rootThreadId: parentId,
+                  relationshipToParent: "subagent",
+                },
+              },
+            },
           ],
         });
+        const jobs: Array<Extract<OrchestrationV2TurnItem, { type: "system_notice" }>> = [];
+        const jobTime = yield* DateTime.now;
+        for (const destination of [threadId, parentId]) {
+          for (const name of [
+            "old",
+            "latest",
+            "output",
+            "completed",
+            "replacement",
+            "other-source",
+          ]) {
+            jobs.push({
+              id: TurnItemId.make(destination + ":" + name),
+              threadId: destination,
+              runId: null,
+              nodeId: null,
+              providerThreadId: null,
+              providerTurnId: null,
+              nativeItemRef: null,
+              parentItemId: null,
+              ordinal: jobs.length,
+              status: "running",
+              title: name,
+              startedAt: jobTime,
+              completedAt: null,
+              updatedAt: jobTime,
+              type: "system_notice",
+              message: "",
+              job: {
+                version: 1,
+                scope: "old-runtime",
+                id: String(
+                  ["old", "latest", "output", "completed", "replacement", "other-source"].indexOf(
+                    name,
+                  ) + 1,
+                ),
+                name,
+                command: "make",
+                cwd: "/tmp",
+                state: "running",
+                startedAt: DateTime.toEpochMillis(jobTime),
+                endedAt: null,
+                exitCode: null,
+                signal: null,
+                output: "initial",
+                providerSessionId,
+                ...(name === "other-source"
+                  ? { sourceThreadId: ThreadId.make("unrelated-child") }
+                  : destination === parentId
+                    ? { sourceThreadId: threadId }
+                    : {}),
+              },
+            });
+          }
+        }
+        const writeJobs = (items: typeof jobs) =>
+          Effect.gen(function* () {
+            yield* eventSink.write({
+              events: yield* Effect.forEach(items, (item) =>
+                Effect.gen(function* () {
+                  return {
+                    id: yield* idAllocator.allocate.event({ threadId: item.threadId }),
+                    type: "turn-item.updated" as const,
+                    threadId: item.threadId,
+                    occurredAt: item.updatedAt,
+                    payload: item,
+                  };
+                }),
+              ),
+            });
+          });
+        yield* writeJobs(jobs);
         const roster = {
           ...makeProviderThread({
             idAllocator,
@@ -3655,7 +3752,69 @@ it.effect.each([false, true])(
           })
           .pipe(Stream.runHead, Effect.forkScoped);
         yield* TestClock.adjust("500 millis");
+        yield* Deferred.await(paused);
+        // The retry already read its cancellation candidates. Mutate the real
+        // projection before its EventSink transaction, not the mocked payload.
+        const changedAt = yield* DateTime.now;
+        yield* writeJobs(
+          jobs
+            .filter((item) => item.title !== "old" && item.title !== "other-source")
+            .map((item) => ({
+              ...item,
+              status: item.title === "completed" ? "completed" : "running",
+              completedAt: item.title === "completed" ? changedAt : null,
+              updatedAt:
+                item.title === "output" || item.title === "replacement"
+                  ? changedAt
+                  : item.updatedAt,
+              job: {
+                ...item.job!,
+                output: "new output",
+                state: item.title === "completed" ? "succeeded" : "running",
+                scope: item.title === "replacement" ? "new-runtime" : item.job!.scope,
+                endedAt: item.title === "completed" ? DateTime.toEpochMillis(changedAt) : null,
+                exitCode: item.title === "completed" ? 0 : null,
+              },
+            })),
+        );
+        yield* Deferred.succeed(resume, undefined);
         yield* Fiber.join(settled);
+        for (const destination of [threadId, parentId]) {
+          const { turnItems } = yield* projectionStore.getThreadRecords(
+            destination,
+            ["turnItems"],
+            { turnItemTypes: ["system_notice"] },
+          );
+          for (const original of jobs.filter((item) => item.threadId === destination)) {
+            const current = turnItems.find((item) => item.id === original.id);
+            assert.equal(current?.type, "system_notice");
+            if (current?.type !== "system_notice") continue;
+            const cancelled = original.title === "old" || original.title === "latest";
+            assert.equal(
+              current.status,
+              cancelled ? "cancelled" : original.title === "completed" ? "completed" : "running",
+            );
+            assert.equal(
+              current.job?.state,
+              cancelled ? "lost" : original.title === "completed" ? "succeeded" : "running",
+            );
+            assert.equal(
+              current.job?.output,
+              original.title === "old" || original.title === "other-source"
+                ? "initial"
+                : "new output",
+            );
+            assert.equal(
+              current.job?.scope,
+              original.title === "replacement" ? "new-runtime" : "old-runtime",
+            );
+            if (original.title === "completed") {
+              assert.equal(current.job?.exitCode, 0);
+              assert.equal(current.job?.endedAt, DateTime.toEpochMillis(changedAt));
+              assert.deepEqual(current.completedAt, changedAt);
+            }
+          }
+        }
 
         const projection = yield* projectionStore.getThreadProjection(threadId);
         const request = (id: typeof oldRequestId) =>
@@ -3671,7 +3830,14 @@ it.effect.each([false, true])(
       });
 
       yield* effect.pipe(
-        Effect.provide(layerTest({ state, idleTimeoutMs: 60_000, flakyReleaseWrites: flaky })),
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60_000,
+            flakyReleaseWrites: flaky,
+            stopJob: () => Effect.void,
+          }),
+        ),
       );
     }),
 );
@@ -4199,6 +4365,7 @@ it.effect(
         );
         yield* Queue.offer(queue!, {
           type: "turn.terminal",
+          runAttemptId: idAllocator.derive.runAttempt({ runId: firstRunId, attemptOrdinal: 1 }),
           driver: CODEX_DRIVER,
           providerThreadId: firstProviderThread.id,
           providerTurnId: firstProviderTurnId,
@@ -4221,6 +4388,7 @@ it.effect(
         );
         yield* Queue.offer(queue!, {
           type: "turn.terminal",
+          runAttemptId: idAllocator.derive.runAttempt({ runId: secondRunId, attemptOrdinal: 1 }),
           driver: CODEX_DRIVER,
           providerThreadId: secondProviderThread.id,
           providerTurnId: secondProviderTurnId,
@@ -4622,6 +4790,10 @@ function runIdleThreadUnloadScenario(
             );
             yield* Queue.offer(queue!, {
               type: "turn.terminal",
+              runAttemptId: idAllocator.derive.runAttempt({
+                runId: idAllocator.derive.run({ threadId, ordinal }),
+                attemptOrdinal: 1,
+              }),
               driver: CODEX_DRIVER,
               providerThreadId: providerThreadOf(threadId).id,
               providerTurnId: idAllocator.derive.providerTurn({
@@ -5268,6 +5440,7 @@ it.effect.each([
         yield* flush([
           {
             type: "turn.terminal",
+            runAttemptId: ids.derive.runAttempt({ runId: originalRunId, attemptOrdinal: 1 }),
             driver: CODEX_DRIVER,
             providerThreadId: providerThread.id,
             providerTurnId: ids.derive.providerTurn({
@@ -5992,6 +6165,7 @@ it.effect(
         yield* flush([
           {
             type: "turn.terminal",
+            runAttemptId: firstAttempt,
             driver: CODEX_DRIVER,
             providerThreadId: providerThread.id,
             providerTurnId: firstTurnId,

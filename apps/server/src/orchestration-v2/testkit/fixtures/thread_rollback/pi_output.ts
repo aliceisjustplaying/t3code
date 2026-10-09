@@ -47,8 +47,28 @@ export function assertPiThreadRollbackOutput(
   assertSemanticProjectionIntegrity(projection);
   assertRunOrdinals(projection, [1, 2, 3]);
   const turn = ["user_message", "reasoning", "assistant_message", "checkpoint"] as const;
-  assertTurnItemTypeSequence(projection, [...turn, ...turn, ...turn]);
-  assertVisibleTurnItemTypeSequence(projection, [...turn, ...turn]);
+  // The recorded resumed process emits two startup warnings before its next turn.
+  const notices = projection.turnItems.filter((item) => item.type === "system_notice");
+  assert.deepEqual(
+    notices.map((item) => item.message),
+    [
+      "t3-code MCP unavailable: T3_MCP_URL or T3_MCP_BEARER_TOKEN is missing.",
+      "t3-code MCP unavailable: T3_MCP_URL or T3_MCP_BEARER_TOKEN is missing.",
+    ],
+  );
+  assertTurnItemTypeSequence(projection, [
+    "system_notice",
+    "system_notice",
+    ...turn,
+    ...turn,
+    ...turn,
+  ]);
+  assertVisibleTurnItemTypeSequence(projection, [
+    "system_notice",
+    "system_notice",
+    ...turn,
+    ...turn,
+  ]);
   assertUserMessagesInclude(projection, [
     THREAD_ROLLBACK_FIRST_PROMPT,
     THREAD_ROLLBACK_SECOND_PROMPT,

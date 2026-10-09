@@ -1,11 +1,12 @@
 import { useAtomValue } from "@effect/atom-react";
 import { useNavigation } from "@react-navigation/native";
 import { appendHeadsUpFollowUp, groupHeadsUpInbox } from "@t3tools/client-runtime/heads-up";
-import type {
-  EnvironmentId,
-  HeadsUpInboxEntry,
-  HeadsUpInboxInput,
-  ThreadId,
+import {
+  AuthOrchestrationOperateScope,
+  type EnvironmentId,
+  type HeadsUpInboxEntry,
+  type HeadsUpInboxInput,
+  type ThreadId,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { AsyncResult } from "effect/reactivity";
@@ -19,6 +20,7 @@ import { SymbolView } from "../../components/AppSymbol";
 import { environmentCatalog } from "../../connection/catalog";
 import { scopedThreadKey } from "../../lib/scopedEntities";
 import { headsUpInbox } from "../../state/headsUpInbox";
+import { readEnvironmentScope, useEnvironmentScope } from "../../state/session";
 import { useEnvironmentQuery } from "../../state/query";
 import { useAtomCommand } from "../../state/use-atom-command";
 import {
@@ -129,6 +131,7 @@ function InboxPages({
   readonly onClose: () => void;
   readonly onDraftReady: () => void;
 }) {
+  const canOperate = useEnvironmentScope(environmentId, AuthOrchestrationOperateScope);
   const [view, setView] = useState<HeadsUpInboxInput["view"]>("unresolved");
   const [expanded, setExpanded] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
@@ -151,7 +154,7 @@ function InboxPages({
   const items = page.data?.items;
   const groups = groupHeadsUpInbox(items ?? []);
   useEffect(() => {
-    if (!connected || !items) return;
+    if (!connected || !canOperate || !items) return;
     const unread = items.filter(
       (entry) => entry.readAt === null && !attemptedReads.current.has(entry.id),
     );
@@ -168,7 +171,7 @@ function InboxPages({
       .catch(() => {
         if (mounted.current) setReadError(true);
       });
-  }, [connected, environmentId, items, read]);
+  }, [canOperate, connected, environmentId, items, read]);
   const changeView = (nextView: HeadsUpInboxInput["view"]) => {
     setView(nextView);
     setExpanded(null);
@@ -176,6 +179,7 @@ function InboxPages({
     setFeedback(null);
   };
   const act = async (entry: HeadsUpInboxEntry, resolution: "dismiss" | "knew" | null) => {
+    if (!readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)) return;
     setBusy(entry.id);
     setActionError(null);
     try {
@@ -201,11 +205,13 @@ function InboxPages({
     }
   };
   const ask = async (entry: HeadsUpInboxEntry) => {
+    if (!readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)) return;
     setBusy(entry.id);
     setActionError(null);
     try {
       await waitForComposerDraftsLoaded();
-      if (!mounted.current) return;
+      if (!mounted.current || !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope))
+        return;
       const result = await resolve({
         environmentId,
         input: { threadId: entry.threadId, turnItemId: entry.turnItemId, resolution: "dismiss" },
@@ -345,7 +351,7 @@ function InboxPages({
                     <RequestActionButton
                       label="Ask agent · Draft"
                       accessibilityLabel={`Ask agent · Draft: ${entry.note.line}`}
-                      disabled={!connected || busy !== null}
+                      disabled={!connected || !canOperate || busy !== null}
                       onPress={(event) => {
                         event.stopPropagation();
                         void ask(entry);
@@ -360,7 +366,7 @@ function InboxPages({
                         }
                         accessibilityLabel={`${entry.note.resolution === "dismiss" || entry.note.resolution === "knew" ? "Undo" : "Restore"} · Restore to unresolved: ${entry.note.line}`}
                         tone="secondary"
-                        disabled={!connected || busy !== null}
+                        disabled={!connected || !canOperate || busy !== null}
                         onPress={(event) => {
                           event.stopPropagation();
                           void act(entry, null);
@@ -371,7 +377,7 @@ function InboxPages({
                         <RequestActionButton
                           label="Dismiss"
                           tone="secondary"
-                          disabled={!connected || busy !== null}
+                          disabled={!connected || !canOperate || busy !== null}
                           accessibilityLabel={`Dismiss: ${entry.note.line}`}
                           onPress={(event) => {
                             event.stopPropagation();
@@ -381,7 +387,7 @@ function InboxPages({
                         <RequestActionButton
                           label="Knew"
                           tone="secondary"
-                          disabled={!connected || busy !== null}
+                          disabled={!connected || !canOperate || busy !== null}
                           accessibilityLabel={`Knew: ${entry.note.line}`}
                           onPress={(event) => {
                             event.stopPropagation();
@@ -438,6 +444,7 @@ function InboxPages({
           </Text>
           <RequestActionButton
             label="Retry marking read"
+            disabled={!connected || !canOperate}
             tone="secondary"
             onPress={() => {
               attemptedReads.current.clear();

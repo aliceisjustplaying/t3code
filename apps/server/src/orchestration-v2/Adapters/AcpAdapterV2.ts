@@ -1403,7 +1403,7 @@ interface ActiveAcpSubagent {
    * subscriber remains observable. Non-completed roots retain terminals in
    * memory until the next attach. A later project:true path for the same entry
    * must still project once; this flag prevents double emission and pins
-   * hasPendingBackgroundWork until projection lands.
+   * getBackgroundWork until projection lands.
    */
   terminalStatusProjected: boolean;
 }
@@ -3981,7 +3981,7 @@ export function makeAcpAdapterV2(
           //
           // Skip retaining frames for tasks already hydrated in the root turn
           // (`handledBackgroundTaskIdsInActiveTurn`). Those re-reports must not
-          // pin `hasPendingBackgroundWork` via a wake buffer that never drains
+          // pin `getBackgroundWork` via a wake buffer that never drains
           // (the already-handled gate below intentionally skips
           // `offerContinuationRun` to avoid synthetic "Background task
           // completed." spam).
@@ -4218,7 +4218,7 @@ export function makeAcpAdapterV2(
             }
             const bufferOutcome = yield* bufferPostSettleWake(notification);
             // Post-settle carryover sync: keep in-memory carryover accurate so
-            // hasPendingBackgroundWork reasons correctly after root settle.
+            // getBackgroundWork reasons correctly after root settle.
             // A completed root keeps its subscriber open while background items
             // remain, so project its terminals immediately even when the wake
             // frame is buffered for a continuation. Non-completed roots stay
@@ -5234,7 +5234,7 @@ export function makeAcpAdapterV2(
 
         /**
          * Update a carryover subagent matched by native task id or child session
-         * id. Post-settle completions must flip the pin in hasPendingBackgroundWork
+         * id. Post-settle completions must flip the pin in getBackgroundWork
          * without waiting for a new user turn to consume carryover.
          * When `project` is false, only the in-memory carryover status advances
          * (the next attach projects the terminal state).
@@ -6662,6 +6662,7 @@ export function makeAcpAdapterV2(
             settledStatus === "failed"
               ? {
                   type: "turn.terminal",
+                  runAttemptId: context.input.attemptId,
                   driver,
                   providerThreadId: context.input.providerThread.id,
                   providerTurnId: context.providerTurnId,
@@ -6682,6 +6683,7 @@ export function makeAcpAdapterV2(
                 }
               : {
                   type: "turn.terminal",
+                  runAttemptId: context.input.attemptId,
                   driver,
                   providerThreadId: context.input.providerThread.id,
                   providerTurnId: context.providerTurnId,
@@ -7312,10 +7314,13 @@ export function makeAcpAdapterV2(
           events: Stream.fromEffectRepeat(Queue.take(events)),
           ...(postSettleContinuationEnabled
             ? {
-                hasPendingBackgroundWork: Effect.gen(function* () {
-                  if ((yield* Ref.get(wakeBuffer)).length > 0) return true;
-                  if (yield* Ref.get(continuationRequested)) return true;
-                  if ((yield* Ref.get(runningBackgroundTaskIds)).size > 0) return true;
+                getBackgroundWork: Effect.gen(function* () {
+                  if ((yield* Ref.get(wakeBuffer)).length > 0)
+                    return { pending: true, retained: false };
+                  if (yield* Ref.get(continuationRequested))
+                    return { pending: true, retained: false };
+                  if ((yield* Ref.get(runningBackgroundTaskIds)).size > 0)
+                    return { pending: true, retained: false };
                   // Projected post-settle Grok subagents can outlive the root
                   // turn via carryover; keep the ACP process pinned until they
                   // terminalize or teardown clears the carryover.
@@ -7328,16 +7333,16 @@ export function makeAcpAdapterV2(
                     active !== null &&
                     [...active.subagents.values()].some(acpSubagentHasPendingBackgroundWork)
                   ) {
-                    return true;
+                    return { pending: true, retained: false };
                   }
                   const carryover = yield* Ref.get(carryoverSubagents);
                   if (
                     carryover !== null &&
                     carryover.subagents.some(acpSubagentHasPendingBackgroundWork)
                   ) {
-                    return true;
+                    return { pending: true, retained: false };
                   }
-                  return false;
+                  return { pending: false, retained: false };
                 }),
               }
             : {}),

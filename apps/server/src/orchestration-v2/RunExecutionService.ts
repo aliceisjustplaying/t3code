@@ -453,7 +453,8 @@ export function routeProviderEvent(
         state,
       ];
     case "turn.terminal":
-      return event.providerTurnId === state.rootProviderTurnId
+      return event.runAttemptId === input.attemptId &&
+        event.providerTurnId === state.rootProviderTurnId
         ? [true, { ...state, rootTurnEnded: true }]
         : [false, state];
   }
@@ -568,7 +569,8 @@ export const layer: Layer.Layer<
       readonly openRunOwnedSubagents?: OpenRunOwnedSubagentProjection;
       readonly terminal: ProviderTerminalEvent;
       readonly failureItemPersisted: boolean;
-      readonly providerThreadPersistedBySession?: boolean;
+      /** Only synthetic failures need a thread status write; the pump owns provider terminals. */
+      readonly providerTerminalReceived?: boolean;
       readonly refreshAfterTurn: Effect.Effect<void>;
       readonly writeIfRunCurrent?: {
         readonly activeAttemptId: RunAttemptId;
@@ -770,7 +772,7 @@ export const layer: Layer.Layer<
               occurredAt: completedAt,
               payload: finalizedRootNode,
             },
-            ...(input.providerThreadPersistedBySession === true
+            ...(input.providerTerminalReceived === true
               ? []
               : [
                   {
@@ -822,6 +824,7 @@ export const layer: Layer.Layer<
             failureItemOrdinal: number,
           ): ProviderTerminalEvent => ({
             type: "turn.terminal",
+            runAttemptId: input.attempt.id,
             driver: input.providerThread.driver,
             providerThreadId: input.providerThread.id,
             providerTurnId:
@@ -958,7 +961,6 @@ export const layer: Layer.Layer<
           );
           const rootTerminalSeen = yield* Ref.make(false);
           const rootRunFinalized = yield* Ref.make(false);
-          const providerThreadOwnerLost = yield* Ref.make(false);
           const activeChildProviderTurns = yield* Ref.make<ReadonlySet<ProviderTurnId>>(new Set());
           const activeChildSubagents = yield* Ref.make<ReadonlySet<NodeId>>(new Set());
           const activeBackgroundTurnItems = yield* Ref.make<
@@ -997,9 +999,7 @@ export const layer: Layer.Layer<
                 openRunOwnedSubagents: openSubagents,
                 terminal,
                 failureItemPersisted: terminal.status === "failed",
-                providerThreadPersistedBySession:
-                  "persistsProviderThreadEvents" in input.session &&
-                  input.session.persistsProviderThreadEvents === true,
+                providerTerminalReceived: true,
                 refreshAfterTurn,
               }).pipe(
                 Effect.mapError(
@@ -1169,32 +1169,6 @@ export const layer: Layer.Layer<
             // The session pump owns durable root rosters, including their clears.
             // Managed runs retain only their owned children/items, never a roster
             // that a later turn on the same native thread may keep nonempty.
-            if (
-              "persistsProviderThreadEvents" in input.session &&
-              input.session.persistsProviderThreadEvents === true
-            ) {
-              return true;
-            }
-            // Unmanaged roots still need their roster subscription until owner loss.
-            if (yield* Ref.get(providerThreadOwnerLost)) {
-              return true;
-            }
-            // Claude background Bash has no turn-item projection. Keep the
-            // stream open while this root's provider thread still reports
-            // pending roster work so late empty updates can clear Waiting.
-            // Use only the thread-scoped probe: session-wide pending work
-            // (siblings, wake buffers, session subagents) must not pin this
-            // root subscription. Session idle release still uses
-            // hasPendingBackgroundWork via ProviderSessionManager.
-            const latestProviderThreadSnapshot = yield* Ref.get(latestProviderThread);
-            if (input.session.hasPendingBackgroundWorkForThread !== undefined) {
-              const hasPendingWork = yield* input.session
-                .hasPendingBackgroundWorkForThread(latestProviderThreadSnapshot)
-                .pipe(Effect.catchCause(() => Effect.succeed(false)));
-              if (hasPendingWork) {
-                return false;
-              }
-            }
             return true;
           });
           const filterAssistantEvent = makeAssistantStreamingFilter(responseStreamingMode);
@@ -1206,10 +1180,8 @@ export const layer: Layer.Layer<
               Effect.gen(function* () {
                 let storedEventCount = 0;
                 // Managed roots observe snapshots already committed by the pump.
-                // Native child threads and unmanaged adapters still ingest here.
+                // Native child threads still ingest here.
                 const sessionOwnedThreadUpdate =
-                  "persistsProviderThreadEvents" in input.session &&
-                  input.session.persistsProviderThreadEvents === true &&
                   event.type === "provider_thread.updated" &&
                   event.providerThread.id === input.providerThread.id &&
                   event.providerThread.appThreadId === input.run.threadId &&
@@ -1219,15 +1191,6 @@ export const layer: Layer.Layer<
                   DateTime.toEpochMillis(yield* DateTime.now),
                 );
                 if (deliveredEvent && !sessionOwnedThreadUpdate) {
-                  // Root provider_thread.updated always uses an ownership gate:
-                  // pre-terminal writeIfRunCurrent (attempt still running), or
-                  // post-terminal writeIfProviderThreadOwner so late roster
-                  // clears still land while this attempt owns the run and this
-                  // run owns lastRunOrdinal.
-                  const rootTerminalAlreadySeen = yield* Ref.get(rootTerminalSeen);
-                  const isRootProviderThreadUpdate =
-                    event.type === "provider_thread.updated" &&
-                    event.providerThread.id === input.providerThread.id;
                   const storedEvents = yield* providerEventIngestor.ingestNormalized({
                     analyticsContext: {
                       modelSelection: input.modelSelection,
@@ -1240,35 +1203,8 @@ export const layer: Layer.Layer<
                     runId: input.run.id,
                     nodeId: input.rootNode.id,
                     event: deliveredEvent,
-                    ...(isRootProviderThreadUpdate
-                      ? rootTerminalAlreadySeen
-                        ? {
-                            writeIfProviderThreadOwner: {
-                              providerThreadId: input.providerThread.id,
-                              runId: input.run.id,
-                              activeAttemptId: input.attempt.id,
-                              expectedLastRunOrdinal: input.run.ordinal,
-                            },
-                          }
-                        : {
-                            writeIfRunCurrent: {
-                              runId: input.run.id,
-                              activeAttemptId: input.attempt.id,
-                              expectedStatus: "running" as const,
-                            },
-                          }
-                      : {}),
                   });
                   storedEventCount = storedEvents.length;
-                  if (
-                    isRootProviderThreadUpdate &&
-                    rootTerminalAlreadySeen &&
-                    storedEventCount === 0
-                  ) {
-                    // Ownership lost (or thread row missing). Stop pinning the
-                    // stream on this run's background probe.
-                    yield* Ref.set(providerThreadOwnerLost, true);
-                  }
                 }
                 if (event.type === "provider_thread.updated") {
                   if (

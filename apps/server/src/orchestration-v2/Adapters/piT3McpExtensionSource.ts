@@ -232,7 +232,7 @@ function createMcpClient(endpoint: string, token: string) {
 export default async function t3McpExtension(pi: ExtensionAPI) {
   pi.registerCommand("t3-background-work", {
     description: "Report completion-blocking work and retained services to the T3 session manager",
-    handler: async (_args, ctx) => {
+    handler: async (args, ctx) => {
       const globals = globalThis as unknown as Record<symbol, unknown>;
       const keepalive = globals[Symbol.for("pi-subagents/keepalive")];
       const runtime = globals[Symbol.for("pi-subagents/runtime")] as { runningSubagents?: Map<unknown, unknown> } | undefined;
@@ -248,7 +248,7 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
           if (entry?.retained === true) retained = true;
         }
       }
-      ctx.ui.setStatus("t3:background-work", JSON.stringify({ pending, retained }));
+      ctx.ui.setStatus("t3:background-work", JSON.stringify({ probeId: args.trim(), pending, retained }));
     },
   });
   // Workaround for an upstream Pi context-budgeting bug: pi-ai reuses the

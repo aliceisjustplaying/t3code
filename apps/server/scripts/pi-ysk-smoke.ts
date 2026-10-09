@@ -177,7 +177,7 @@ const program = Effect.gen(function* () {
       },
     });
     NodeAssert.equal(
-      yield* session.hasPendingBackgroundWork!,
+      (yield* session.getBackgroundWork!).pending,
       false,
       "T3's bridge must load alongside YSK",
     );

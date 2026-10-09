@@ -318,6 +318,7 @@ it.effect.each(
         });
         yield* Queue.offer(events, {
           type: "turn.terminal",
+          runAttemptId: turn.runAttemptId!,
           driver,
           providerThreadId: turn.providerThreadId,
           providerTurnId: turn.id,
@@ -684,6 +685,7 @@ it.effect("starts a steer that missed the turn on the saved next-turn selection"
         });
         yield* Queue.offer(events, {
           type: "turn.terminal",
+          runAttemptId: turn.runAttemptId!,
           driver,
           providerThreadId: turn.providerThreadId,
           providerTurnId: turn.id,

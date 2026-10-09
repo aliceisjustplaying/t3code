@@ -159,7 +159,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   const statsQueue: Array<unknown> = [];
   const commandsQueue: Array<{ readonly success: boolean; readonly data?: unknown }> = [];
   const allRequests: Array<PiRpcRecord> = [];
-  let backgroundWork: string = "idle";
+  let backgroundWork = { pending: false, retained: false };
   let deferState = false;
   let deferredStateRequest: PiRpcRecord | undefined;
   let stateFailuresRemaining = 0;
@@ -250,14 +250,25 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
           deferredLifecycle = undefined;
           continue;
         }
-        if (record["type"] === "prompt" && record["message"] === "/t3-background-work") {
+        if (
+          record["type"] === "prompt" &&
+          String(record["message"]).startsWith("/t3-background-work ")
+        ) {
           yield* emit({
             type: "extension_ui_request",
             method: "setStatus",
             statusKey: "t3:background-work",
-            statusText: backgroundWork,
+            statusText: JSON.stringify({
+              probeId: String(record["message"]).split(" ")[1],
+              ...backgroundWork,
+            }),
           });
         }
+        if (
+          record["type"] === "compact" ||
+          (record["type"] === "prompt" && record["streamingBehavior"] === "steer")
+        )
+          continue;
         const response = respondTo(record);
         if (response !== null) yield* emit(response);
       }
@@ -343,12 +354,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
     queueCommands: (data) => commandsQueue.push({ success: true, data }),
     failNextCommands: () => commandsQueue.push({ success: false }),
     setBackgroundWork: (pending, retained) => {
-      backgroundWork =
-        retained === undefined
-          ? pending
-            ? "pending"
-            : "idle"
-          : JSON.stringify({ pending, retained });
+      backgroundWork = { pending, retained: retained ?? false };
     },
     closeStdout: Queue.end(stdout),
     lastSpawn: () => lastSpawn,
@@ -646,10 +652,11 @@ describe("PiAdapterV2", () => {
         yield* offer.clearIfCurrent!();
         assert.isFalse(fake.allRequests().some((request) => request.type === "abort"));
         yield* startTurn(runtime, providerThread);
-        yield* fake.takeRequest("prompt");
+        const prompt = yield* fake.takeRequest("prompt");
         yield* fake.emit({
           type: "response",
           command: "prompt",
+          id: prompt.id,
           success: true,
           data: { disposition: "started" },
         });
@@ -722,10 +729,11 @@ describe("PiAdapterV2", () => {
       const rolledBack = (yield* Fiber.join(rollback)).providerThread;
       assert.equal(rolledBack.nativeThreadRef?.nativeId, "/fake/rolled-back.jsonl");
       yield* startTurn(runtime, rolledBack);
-      yield* fake.takeRequest("prompt");
+      const prompt = yield* fake.takeRequest("prompt");
       yield* fake.emit({
         type: "response",
         command: "prompt",
+        id: prompt.id,
         success: false,
         error: "new prompt rejected",
       });
@@ -884,7 +892,8 @@ describe("PiAdapterV2", () => {
               (request) =>
                 request.type === "abort" ||
                 request.type === "switch_session" ||
-                (request.type === "prompt" && request.message !== "/t3-background-work"),
+                (request.type === "prompt" &&
+                  !String(request.message).startsWith("/t3-background-work ")),
             ),
         );
         assert.deepEqual(
@@ -1006,7 +1015,7 @@ describe("PiAdapterV2", () => {
         ["Hello pi"],
       );
       fake.queueCommands({ commands });
-      assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
+      assert.isFalse((yield* runtime.getBackgroundWork!).pending);
       assert.equal(fake.allRequests().filter((request) => request.type === "prompt").length, 1);
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
@@ -1017,7 +1026,7 @@ describe("PiAdapterV2", () => {
       const { runtime } = yield* openRuntime(fake);
       yield* fake.takeRequest("get_commands");
       fake.failNextCommands();
-      assert.isTrue(yield* runtime.hasPendingBackgroundWork!);
+      assert.isTrue((yield* runtime.getBackgroundWork!).pending);
       assert.isFalse(fake.allRequests().some((request) => request.type === "prompt"));
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
@@ -1098,7 +1107,11 @@ describe("PiAdapterV2", () => {
       assert.isFalse(
         fake
           .allRequests()
-          .some((record) => record.type === "prompt" && record.message !== "/t3-background-work"),
+          .some(
+            (record) =>
+              record.type === "prompt" &&
+              !String(record.message).startsWith("/t3-background-work "),
+          ),
       );
       // A taken wake asks for no second turn.
       assert.deepEqual(yield* offer.dispatchIfCurrent!(Effect.succeed("again")), Option.none());
@@ -1176,10 +1189,11 @@ describe("PiAdapterV2", () => {
       yield* Queue.take(offers);
 
       yield* startTurn(runtime, providerThread);
-      yield* fake.takeRequest("prompt");
+      const prompt = yield* fake.takeRequest("prompt");
       yield* fake.emit({
         type: "response",
         command: "prompt",
+        id: prompt.id,
         success: false,
         error: "Agent is already processing.",
       });
@@ -1246,7 +1260,7 @@ describe("PiAdapterV2", () => {
         yield* Queue.take(offers);
 
         yield* startTurn(runtime, providerThread);
-        yield* fake.takeRequest("prompt");
+        const prompt = yield* fake.takeRequest("prompt");
         // The replayed settle probes Pi, which answers before its prompt
         // preflight is done and so still reports idle.
         yield* fake.takeRequest("get_state");
@@ -1261,6 +1275,7 @@ describe("PiAdapterV2", () => {
         yield* fake.emit({
           type: "response",
           command: "prompt",
+          id: prompt.id,
           success: true,
           data: { disposition: "started" },
         });
@@ -1387,7 +1402,8 @@ describe("PiAdapterV2", () => {
             .allRequests()
             .some(
               (request) =>
-                request["type"] === "prompt" && request["message"] !== "/t3-background-work",
+                request["type"] === "prompt" &&
+                !String(request["message"]).startsWith("/t3-background-work "),
             ),
         );
         fake.queueCommands({ commands: [{ name: "wake-stop", source: "extension" }] });
@@ -1397,7 +1413,8 @@ describe("PiAdapterV2", () => {
             .allRequests()
             .filter(
               (request) =>
-                request["type"] === "prompt" && request["message"] !== "/t3-background-work",
+                request["type"] === "prompt" &&
+                !String(request["message"]).startsWith("/t3-background-work "),
             )
             .map((request) => request["message"]),
           ["/wake-stop runtime-one 1"],
@@ -1485,13 +1502,12 @@ describe("PiAdapterV2", () => {
             if (event.type === "turn.terminal") break;
           }
           assert.equal((providerThread.pendingBackgroundTasks?.length ?? 0) > 0, pending);
-          assert.equal(yield* runtime.hasPendingBackgroundWork!, pending);
-          assert.equal(yield* runtime.hasRetainedBackgroundServices!, retained);
+          assert.deepEqual(yield* runtime.getBackgroundWork!, { pending, retained });
         }
         // Pi's own queue is authoritative for messages already handed to it.
         fake.setBackgroundWork(false, true);
         fake.queueState({ pendingMessageCount: 1 });
-        assert.isTrue(yield* runtime.hasPendingBackgroundWork!);
+        assert.isTrue((yield* runtime.getBackgroundWork!).pending);
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
@@ -1509,18 +1525,55 @@ describe("PiAdapterV2", () => {
       });
       for (const pending of [true, false]) {
         fake.setBackgroundWork(pending);
-        const probe = yield* Effect.forkChild(runtime.hasPendingBackgroundWork!);
+        const probe = yield* Effect.forkChild(runtime.getBackgroundWork!);
         const request = yield* fake.takeRequest("prompt");
-        assert.equal(request["message"], "/t3-background-work");
+        assert.match(String(request["message"]), /^\/t3-background-work \d+$/);
         yield* fake.emit({
           type: "extension_ui_request",
           method: "setStatus",
           statusKey: "t3:background-work",
-          statusText: pending ? "pending" : "idle",
+          statusText: JSON.stringify({
+            probeId: String(request["message"]).split(" ")[1],
+            pending,
+            retained: false,
+          }),
         });
-        assert.equal(yield* Fiber.join(probe), pending);
-        assert.isFalse(yield* runtime.hasRetainedBackgroundServices!);
+        assert.deepEqual(yield* Fiber.join(probe), { pending, retained: false });
       }
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("ignores a timed-out background probe's status after the next probe begins", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime } = yield* openRuntime(fake);
+      fake.deferNextRequest("prompt");
+      const first = yield* Effect.forkChild(runtime.getBackgroundWork!);
+      const requestA = yield* fake.takeRequest("prompt");
+      yield* TestClock.adjust(Duration.seconds(2));
+      assert.isTrue((yield* Fiber.join(first)).pending);
+
+      fake.deferNextRequest("prompt");
+      const second = yield* Effect.forkChild(runtime.getBackgroundWork!);
+      const requestB = yield* fake.takeRequest("prompt");
+      assert.notEqual(requestA.message, requestB.message);
+      yield* fake.emit({ type: "response", id: requestB.id, command: "prompt", success: true });
+      for (const [request, pending] of [
+        [requestA, false],
+        [requestB, true],
+      ] as const) {
+        yield* fake.emit({
+          type: "extension_ui_request",
+          method: "setStatus",
+          statusKey: "t3:background-work",
+          statusText: JSON.stringify({
+            probeId: String(request.message).split(" ")[1],
+            pending,
+            retained: false,
+          }),
+        });
+      }
+      assert.deepEqual(yield* Fiber.join(second), { pending: true, retained: false });
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
@@ -2001,6 +2054,7 @@ describe("PiAdapterV2", () => {
           return event.type === "turn.terminal";
         });
         if (terminal.type !== "turn.terminal") return yield* Effect.die("Expected terminal");
+        assert.equal(terminal.runAttemptId, attemptId);
         assert.equal(terminal.status, settlement === "transport-death" ? "failed" : settlement);
         assert.isAtLeast(snapshots.length, 2, "roster refresh and final idle snapshot");
         for (const snapshot of snapshots) {
@@ -2459,7 +2513,7 @@ describe("PiAdapterV2", () => {
         runtimePolicy,
       });
       yield* startTurn(runtime, providerThread, "default", [], "/command-only");
-      yield* fake.takeRequest("prompt");
+      const prompt = yield* fake.takeRequest("prompt");
       // A pure extension command: dialog + notify, then the deferred ack —
       // pi emits no agent_start/agent_settled at all.
       yield* fake.emit({
@@ -2477,7 +2531,7 @@ describe("PiAdapterV2", () => {
           notice.turnItem.type === "system_notice" &&
           notice.turnItem.message === "/op:status done\n\nTask: alpha",
       );
-      yield* fake.emit({ type: "response", command: "prompt", success: true });
+      yield* fake.emit({ type: "response", command: "prompt", id: prompt.id, success: true });
       // The adapter probes get_state (auto-acked idle by the fake), then
       // settles the turn as completed.
       const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
@@ -2511,10 +2565,11 @@ describe("PiAdapterV2", () => {
         runtimePolicy,
       });
       yield* startTurn(runtime, providerThread, "default", [], "/compact");
-      yield* fake.takeRequest("compact");
+      const compact = yield* fake.takeRequest("compact");
       yield* fake.emit({
         type: "response",
         command: "compact",
+        id: compact.id,
         success: false,
         error: "Nothing to compact (session too small)",
       });
@@ -2609,7 +2664,7 @@ describe("PiAdapterV2", () => {
           event.turnItem.type === "compaction" &&
           event.turnItem.status === "completed",
       );
-      yield* fake.emit({ type: "response", command: "compact", success: true });
+      yield* fake.emit({ type: "response", command: "compact", id: compact.id, success: true });
       yield* fake.emit({ type: "agent_settled" });
       yield* fake.takeRequest("get_state");
       const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
@@ -3058,13 +3113,20 @@ describe("PiAdapterV2", () => {
               undefined,
               ordinal,
             );
-            yield* fake.takeRequest("prompt");
+            let command = yield* fake.takeRequest("prompt");
+            while (command.streamingBehavior !== "steer")
+              command = yield* fake.takeRequest("prompt");
             if (path === "settle probe") {
               yield* fake.emit({ type: "agent_start" });
               yield* fake.emit({ type: "agent_settled" });
             } else {
               fake.failNextState();
-              yield* fake.emit({ type: "response", command: "prompt", success: true });
+              yield* fake.emit({
+                type: "response",
+                command: "prompt",
+                id: command.id,
+                success: true,
+              });
             }
             yield* takeEvent((event) => event.type === "turn.terminal");
           });
@@ -3135,9 +3197,10 @@ describe("PiAdapterV2", () => {
           undefined,
           ordinal,
         );
-        yield* fake.takeRequest("prompt");
+        let command = yield* fake.takeRequest("prompt");
+        while (command.streamingBehavior !== "steer") command = yield* fake.takeRequest("prompt");
         if (failedReads > 0) fake.failNextState(failedReads);
-        yield* fake.emit({ type: "response", command: "prompt", success: true });
+        yield* fake.emit({ type: "response", command: "prompt", id: command.id, success: true });
         const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
         assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
       });
@@ -3433,40 +3496,54 @@ describe("PiAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
-  it.effect("keeps a settled turn's late prompt rejection off the next turn", () =>
-    Effect.gen(function* () {
-      const fake = yield* makeFakePi;
-      const { runtime, takeEvent } = yield* openRuntime(fake);
-      const providerThread = yield* runtime.ensureThread({
-        threadId: THREAD_ID,
-        modelSelection: modelSelection("default"),
-        runtimePolicy,
-      });
-      // An extension command can hold its prompt ack open past settlement.
-      yield* startTurn(runtime, providerThread, "default", [], "/my-command");
-      yield* fake.takeRequest("prompt");
-      yield* fake.emit({ type: "agent_start" });
-      yield* fake.emit({ type: "agent_settled" });
-      const firstTerminal = yield* takeEvent((event) => event.type === "turn.terminal");
-      assert.isTrue(firstTerminal.type === "turn.terminal" && firstTerminal.status === "completed");
+  it.effect.each(["old-first", "new-first"] as const)(
+    "keeps a settled turn's late rejection off the next turn (%s)",
+    (order) =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const { runtime, takeEvent } = yield* openRuntime(fake);
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        // An extension command can hold its prompt ack open past settlement.
+        yield* startTurn(runtime, providerThread, "default", [], "/my-command");
+        const firstPrompt = yield* fake.takeRequest("prompt");
+        yield* fake.emit({ type: "agent_start" });
+        yield* fake.emit({ type: "agent_settled" });
+        const firstTerminal = yield* takeEvent((event) => event.type === "turn.terminal");
+        assert.isTrue(
+          firstTerminal.type === "turn.terminal" && firstTerminal.status === "completed",
+        );
 
-      yield* startTurn(runtime, providerThread, "default", [], "Second turn", undefined, 2);
-      yield* fake.takeRequest("prompt");
-      // The rejection answers the first turn's prompt. It must not consume or
-      // fail the second turn's prompt acknowledgement.
-      yield* fake.emit({
-        type: "response",
-        command: "prompt",
-        success: false,
-        error: "late command rejection",
-      });
-      yield* fake.emit({ type: "agent_start" });
-      yield* fake.emit({ type: "agent_settled" });
-      const secondTerminal = yield* takeEvent((event) => event.type === "turn.terminal");
-      assert.isTrue(
-        secondTerminal.type === "turn.terminal" && secondTerminal.status === "completed",
-      );
-    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+        yield* startTurn(runtime, providerThread, "default", [], "Second turn", undefined, 2);
+        let secondPrompt = yield* fake.takeRequest("prompt");
+        while (secondPrompt.message !== "Second turn")
+          secondPrompt = yield* fake.takeRequest("prompt");
+        const oldReply = {
+          type: "response",
+          command: "prompt",
+          id: firstPrompt.id,
+          success: false,
+          error: "late command rejection",
+        };
+        const newReply = {
+          type: "response",
+          command: "prompt",
+          id: secondPrompt.id,
+          success: true,
+        };
+        for (const reply of order === "old-first" ? [oldReply, newReply] : [newReply, oldReply]) {
+          yield* fake.emit(reply);
+        }
+        yield* fake.emit({ type: "agent_start" });
+        yield* fake.emit({ type: "agent_settled" });
+        const secondTerminal = yield* takeEvent((event) => event.type === "turn.terminal");
+        assert.isTrue(
+          secondTerminal.type === "turn.terminal" && secondTerminal.status === "completed",
+        );
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("starts a turn while an extension run is already streaming", () =>
@@ -3488,11 +3565,12 @@ describe("PiAdapterV2", () => {
           ? {
               type: "response",
               command: "prompt",
+              id: prompt.id,
               success: false,
               error:
                 "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
             }
-          : { type: "response", command: "prompt", success: true },
+          : { type: "response", command: "prompt", id: prompt.id, success: true },
       );
       yield* fake.emit({ type: "agent_settled" });
       const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
@@ -4178,7 +4256,7 @@ describe("PiRpc framing", () => {
 // an honest fit. The boundary is the stdio transport seeing stdout end.
 describe("PiRpc response ownership", () => {
   it.effect(
-    "discards late correlated prompt replies but delivers id-less prompt acknowledgements",
+    "discards late request replies and preserves enqueued acknowledgements without a deadline",
     () =>
       Effect.gen(function* () {
         const fake = yield* makeFakePi;
@@ -4201,17 +4279,22 @@ describe("PiRpc response ownership", () => {
         yield* fake.emit(lateReply);
         yield* fake.emit(lateReply); // Duplicate/unmatched replies are not session events either.
         yield* fake.emit({ ...lateReply, id: 17 });
+        const owner = { owner: { providerTurnId: "new-turn", kind: "turn_start" } };
+        fake.deferNextRequest("prompt");
+        yield* connection.enqueue({ type: "prompt", message: "/dialog" }, owner);
+        const prompt = yield* fake.takeRequest("prompt");
+        yield* TestClock.adjust(Duration.seconds(60));
         const rejectedPrompt = {
           type: "response",
           command: "prompt",
+          id: prompt.id,
           success: false,
           error: "new user prompt rejected",
         };
         yield* fake.emit(rejectedPrompt);
         yield* fake.emit({ type: "agent_start" });
-        // The first event is the real user ack, not a stale probe ack that could
-        // consume that user's adapter FIFO slot and hide this rejection.
-        assert.deepEqual(yield* Queue.take(connection.events), rejectedPrompt);
+        // The response stays before the following activity in the ordered pump.
+        assert.deepEqual(yield* Queue.take(connection.events), { ...rejectedPrompt, ...owner });
         assert.deepEqual(yield* Queue.take(connection.events), { type: "agent_start" });
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );

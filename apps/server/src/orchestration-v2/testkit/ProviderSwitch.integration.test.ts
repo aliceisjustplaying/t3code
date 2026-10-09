@@ -330,6 +330,7 @@ function makeTestAdapter(input: {
                 },
                 {
                   type: "turn.terminal",
+                  runAttemptId: turnInput.attemptId,
                   driver: input.driver,
                   providerThreadId: turnInput.providerThread.id,
                   providerTurnId,

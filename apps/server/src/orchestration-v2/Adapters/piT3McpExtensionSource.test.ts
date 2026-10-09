@@ -155,7 +155,7 @@ it("reports native extension keepalives and clears the pin once work finishes", 
         command: { handler: (_args: string, ctx: unknown) => Promise<void> },
       ) {
         handler = () =>
-          command.handler("", {
+          command.handler("probe-17", {
             ui: { setStatus: (_key: string, text: string) => statuses.push(text) },
           });
       },
@@ -188,10 +188,10 @@ it("reports native extension keepalives and clears the pin once work finishes", 
   assert.deepEqual(
     statuses.map((text) => JSON.parse(text)),
     [
-      { pending: false, retained: false },
-      { pending: true, retained: false },
-      { pending: true, retained: false },
-      { pending: false, retained: false },
+      { probeId: "probe-17", pending: false, retained: false },
+      { probeId: "probe-17", pending: true, retained: false },
+      { probeId: "probe-17", pending: true, retained: false },
+      { probeId: "probe-17", pending: false, retained: false },
     ],
   );
   // Only known registry entries may opt out of completion; foreign/old
@@ -199,23 +199,23 @@ it("reports native extension keepalives and clears the pin once work finishes", 
   for (const [script, expected] of [
     [
       'globalThis[Symbol.for("pi-subagents/keepalive")] = new Set(["service"]); globalThis[Symbol.for("pi-wake/background-work")] = new Map([["service", { completionBlocking: false, retained: true }]])',
-      { pending: false, retained: true },
+      { probeId: "probe-17", pending: false, retained: true },
     ],
     [
       'globalThis[Symbol.for("pi-subagents/keepalive")].add("legacy")',
-      { pending: true, retained: true },
+      { probeId: "probe-17", pending: true, retained: true },
     ],
     [
       'globalThis[Symbol.for("pi-subagents/keepalive")].delete("legacy"); globalThis[Symbol.for("pi-subagents/runtime")].runningSubagents.set("child", {})',
-      { pending: true, retained: true },
+      { probeId: "probe-17", pending: true, retained: true },
     ],
     [
       'globalThis[Symbol.for("pi-subagents/runtime")].runningSubagents.clear(); globalThis[Symbol.for("pi-subagents/keepalive")].add("held"); globalThis[Symbol.for("pi-wake/background-work")].set("held", { completionBlocking: true, retained: false })',
-      { pending: true, retained: true },
+      { probeId: "probe-17", pending: true, retained: true },
     ],
     [
       'globalThis[Symbol.for("pi-subagents/keepalive")].clear()',
-      { pending: false, retained: false },
+      { probeId: "probe-17", pending: false, retained: false },
     ],
   ] as const) {
     NodeVM.runInContext(script, context);

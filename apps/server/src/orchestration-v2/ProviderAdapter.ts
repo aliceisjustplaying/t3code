@@ -138,6 +138,7 @@ export const ProviderAdapterV2Event = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("turn.terminal"),
+    runAttemptId: RunAttemptId,
     driver: ProviderDriverKind,
     providerThreadId: ProviderThreadId,
     providerTurnId: ProviderTurnId,
@@ -148,6 +149,7 @@ export const ProviderAdapterV2Event = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("turn.terminal"),
+    runAttemptId: RunAttemptId,
     driver: ProviderDriverKind,
     providerThreadId: ProviderThreadId,
     providerTurnId: ProviderTurnId,
@@ -547,16 +549,17 @@ export interface ProviderAdapterV2SessionRuntime {
   /**
    * Adapters whose native runtime can hold pending work outside an active
    * turn (for example Claude background tasks and their wake turns) report it
-   * here so the session manager defers idle release while it is pending.
+   * here in one snapshot so the session manager defers idle release. Retained
+   * services bypass the finite-work pin cap until explicitly stopped.
    */
-  readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
-  /** Explicit persistent services retain an idle runtime without the finite-work pin cap. */
-  readonly hasRetainedBackgroundServices?: Effect.Effect<boolean>;
+  readonly getBackgroundWork?: Effect.Effect<{
+    readonly pending: boolean;
+    readonly retained: boolean;
+  }>;
   /**
-   * Per-provider-thread pending work for root-run ingestion stop gates. When
-   * present, RunExecutionService uses only this probe (never the session-wide
-   * hasPendingBackgroundWork) so sibling native threads cannot pin an
-   * unrelated root subscription open.
+   * Per-provider-thread pending work for idle thread unload gates. When
+   * present, the session manager uses this probe to isolate native thread work
+   * from sibling activity.
    */
   readonly hasPendingBackgroundWorkForThread?: (
     providerThread: OrchestrationV2ProviderThread,

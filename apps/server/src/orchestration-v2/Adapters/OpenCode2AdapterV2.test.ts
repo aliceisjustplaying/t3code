@@ -671,7 +671,7 @@ describe("OpenCode2 adapter", () => {
         providerTurnId: yield* providerTurnId,
       });
       assert.equal((yield* watch.terminal)?.status, "interrupted");
-      assert.isTrue(yield* runtime.hasPendingBackgroundWork!);
+      assert.isTrue(yield* runtime.getBackgroundWork!.pipe(Effect.map((work) => work.pending)));
     }).pipe(Effect.scoped),
   );
 
@@ -694,7 +694,7 @@ describe("OpenCode2 adapter", () => {
         requestRuntimeRestart: true,
       });
       assert.equal((yield* watch.terminal)?.status, "interrupted");
-      assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
+      assert.isFalse(yield* runtime.getBackgroundWork!.pipe(Effect.map((work) => work.pending)));
     }).pipe(Effect.scoped),
   );
 
@@ -721,7 +721,7 @@ describe("OpenCode2 adapter", () => {
       });
       assert.equal((yield* watch.terminal)?.status, "interrupted");
       // The subagent still runs, so the session is not idle and the next Stop reaches it.
-      assert.isTrue(yield* runtime.hasPendingBackgroundWork!);
+      assert.isTrue(yield* runtime.getBackgroundWork!.pipe(Effect.map((work) => work.pending)));
       assert.isTrue(yield* runtime.hasPendingBackgroundWorkForThread!(thread));
     }).pipe(Effect.scoped),
   );
@@ -779,7 +779,7 @@ describe("OpenCode2 adapter", () => {
         requestRuntimeRestart: true,
       });
       assert.equal((yield* Fiber.join(terminal))?.status, "interrupted");
-      assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
+      assert.isFalse(yield* runtime.getBackgroundWork!.pipe(Effect.map((work) => work.pending)));
     }).pipe(Effect.scoped),
   );
 
@@ -873,7 +873,7 @@ describe("OpenCode2 adapter", () => {
       yield* runtime.startTurn(withLineage(thread));
       yield* Deferred.await(reported);
       // The follow-up execution OpenCode will start for the report is still to come.
-      assert.isTrue(yield* runtime.hasPendingBackgroundWork!);
+      assert.isTrue(yield* runtime.getBackgroundWork!.pipe(Effect.map((work) => work.pending)));
       assert.isTrue(yield* runtime.hasPendingBackgroundWorkForThread!(thread));
     }).pipe(Effect.scoped),
   );
@@ -903,7 +903,7 @@ describe("OpenCode2 adapter", () => {
       );
       yield* runtime.startTurn(withLineage(thread));
       assert.include((yield* Deferred.await(settled)) ?? "", "lost its connection to OpenCode");
-      assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
+      assert.isFalse(yield* runtime.getBackgroundWork!.pipe(Effect.map((work) => work.pending)));
       assert.isFalse(yield* runtime.hasPendingBackgroundWorkForThread!(thread));
     }).pipe(Effect.scoped),
   );
@@ -1236,7 +1236,7 @@ describe("OpenCode2 adapter", () => {
       assert.deepEqual(watch.terminals, ["completed", "completed"]);
       // The first call's background subagent still runs after the second call.
       assert.equal(watch.deep.at(-1), "running");
-      assert.isTrue(yield* runtime.hasPendingBackgroundWork!);
+      assert.isTrue(yield* runtime.getBackgroundWork!.pipe(Effect.map((work) => work.pending)));
       yield* runtime.interruptTurn({
         providerThread: thread,
         providerTurnId: yield* providerTurnId,
@@ -1303,7 +1303,7 @@ describe("OpenCode2 adapter", () => {
       yield* Effect.repeat(runtime.hasPendingBackgroundWorkForThread!(thread), {
         while: (pending) => pending,
       });
-      assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
+      assert.isFalse(yield* runtime.getBackgroundWork!.pipe(Effect.map((work) => work.pending)));
     }).pipe(Effect.scoped),
   );
 

@@ -2017,6 +2017,7 @@ export function makeCursorAdapterV2(
             input.status === "failed"
               ? {
                   type: "turn.terminal",
+                  runAttemptId: input.context.input.attemptId,
                   driver: CursorAgentSdk.CURSOR_PROVIDER,
                   providerThreadId: input.context.input.providerThread.id,
                   providerTurnId: input.context.providerTurnId,
@@ -2031,6 +2032,7 @@ export function makeCursorAdapterV2(
                 }
               : {
                   type: "turn.terminal",
+                  runAttemptId: input.context.input.attemptId,
                   driver: CursorAgentSdk.CURSOR_PROVIDER,
                   providerThreadId: input.context.input.providerThread.id,
                   providerTurnId: input.context.providerTurnId,

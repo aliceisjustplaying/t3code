@@ -2,11 +2,12 @@ import { Dialog } from "@base-ui/react/dialog";
 import { useAtomValue } from "@effect/atom-react";
 import { appendHeadsUpFollowUp, groupHeadsUpInbox } from "@t3tools/client-runtime/heads-up";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
-import type {
-  EnvironmentId,
-  HeadsUpInboxEntry,
-  HeadsUpInboxInput,
-  ThreadId,
+import {
+  AuthOrchestrationOperateScope,
+  type EnvironmentId,
+  type HeadsUpInboxEntry,
+  type HeadsUpInboxInput,
+  type ThreadId,
 } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import { ArrowLeftIcon, LightbulbIcon, XIcon } from "lucide-react";
@@ -18,6 +19,7 @@ import { environmentCatalog } from "../../connection/catalog";
 import { useComposerDraftStore } from "../../composerDraftStore";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { headsUpInbox } from "../../state/headsUpInbox";
+import { readEnvironmentScope, useEnvironmentScope } from "../../state/session";
 import { useEnvironmentQuery } from "../../state/query";
 import { useAtomCommand } from "../../state/use-atom-command";
 import ChatMarkdown from "../ChatMarkdown";
@@ -127,6 +129,7 @@ function InboxPages({
   readonly connected: boolean;
   readonly onClose: () => void;
 }) {
+  const canOperate = useEnvironmentScope(environmentId, AuthOrchestrationOperateScope);
   const [view, setView] = useState<HeadsUpInboxInput["view"]>("unresolved");
   const [expanded, setExpanded] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
@@ -149,7 +152,7 @@ function InboxPages({
   const items = page.data?.items;
   const groups = groupHeadsUpInbox(items ?? []);
   useEffect(() => {
-    if (!connected || !items) return;
+    if (!connected || !canOperate || !items) return;
     const unread = items.filter(
       (entry) => entry.readAt === null && !attemptedReads.current.has(entry.id),
     );
@@ -166,7 +169,7 @@ function InboxPages({
       .catch(() => {
         if (mounted.current) setReadError(true);
       });
-  }, [connected, environmentId, items, read]);
+  }, [canOperate, connected, environmentId, items, read]);
   const changeView = (nextView: HeadsUpInboxInput["view"]) => {
     setView(nextView);
     setExpanded(null);
@@ -174,6 +177,7 @@ function InboxPages({
     setFeedback(null);
   };
   const act = async (entry: HeadsUpInboxEntry, resolution: "dismiss" | "knew" | null) => {
+    if (!readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)) return;
     setBusy(entry.id);
     setActionError(null);
     try {
@@ -199,6 +203,7 @@ function InboxPages({
     }
   };
   const ask = async (entry: HeadsUpInboxEntry) => {
+    if (!readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)) return;
     setBusy(entry.id);
     setActionError(null);
     try {
@@ -335,7 +340,7 @@ function InboxPages({
                   >
                     <Button
                       size="sm"
-                      disabled={!connected || busy !== null}
+                      disabled={!connected || !canOperate || busy !== null}
                       aria-label={`Ask agent · Draft: ${entry.note.line}`}
                       onClick={(event) => {
                         event.stopPropagation();
@@ -348,7 +353,7 @@ function InboxPages({
                       <Button
                         variant="outline"
                         size="sm"
-                        disabled={!connected || busy !== null}
+                        disabled={!connected || !canOperate || busy !== null}
                         aria-label={`${entry.note.resolution === "dismiss" || entry.note.resolution === "knew" ? "Undo" : "Restore"} · Restore to unresolved: ${entry.note.line}`}
                         onClick={(event) => {
                           event.stopPropagation();
@@ -364,7 +369,7 @@ function InboxPages({
                         <Button
                           variant="outline"
                           size="sm"
-                          disabled={!connected || busy !== null}
+                          disabled={!connected || !canOperate || busy !== null}
                           aria-label={`Dismiss: ${entry.note.line}`}
                           onClick={(event) => {
                             event.stopPropagation();
@@ -376,7 +381,7 @@ function InboxPages({
                         <Button
                           variant="outline"
                           size="sm"
-                          disabled={!connected || busy !== null}
+                          disabled={!connected || !canOperate || busy !== null}
                           aria-label={`Knew: ${entry.note.line}`}
                           onClick={(event) => {
                             event.stopPropagation();
@@ -440,6 +445,7 @@ function InboxPages({
           <Button
             variant="outline"
             size="sm"
+            disabled={!connected || !canOperate}
             onClick={() => {
               attemptedReads.current.clear();
               setReadError(false);

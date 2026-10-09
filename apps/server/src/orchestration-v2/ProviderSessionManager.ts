@@ -10,7 +10,6 @@ import {
   ProviderSessionId,
   ThreadId,
   type ProviderThreadId,
-  type ProviderTurnId,
   type RunAttemptId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -159,11 +158,6 @@ export const ProviderSessionManagerV2Error = Schema.Union([
 ]);
 export type ProviderSessionManagerV2Error = typeof ProviderSessionManagerV2Error.Type;
 
-/** Thread snapshots are committed by the session pump before subscribers observe them. */
-interface ManagedProviderSessionRuntime extends ProviderAdapterV2SessionRuntime {
-  readonly persistsProviderThreadEvents: true;
-}
-
 export interface ProviderSessionManagerV2Shape {
   readonly shutdown: Effect.Effect<void>;
   readonly open: (input: {
@@ -226,7 +220,7 @@ interface LiveSessionEntry {
   readonly mcpCredentialIdByThread: ReadonlyMap<ThreadId, string>;
   readonly supportsMultipleProviderThreads: boolean;
   readonly runtime: ProviderAdapterV2SessionRuntime;
-  readonly exposedRuntime: ManagedProviderSessionRuntime;
+  readonly exposedRuntime: ProviderAdapterV2SessionRuntime;
   readonly eventSubscribers: Ref.Ref<
     ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
   >;
@@ -239,8 +233,6 @@ interface LiveSessionEntry {
    * only clear itself and the session is idle when the set is empty.
    */
   readonly busyTurns: ReadonlyMap<string, RunAttemptId>;
-  /** Native turn identity keeps its originating attempt even after a same-run restart. */
-  readonly attemptIdByProviderTurn: Map<ProviderTurnId, RunAttemptId>;
   readonly lastActivityAtMs: number;
   readonly idleFiber: Fiber.Fiber<void, never> | null;
   /** Set when idle release is deferred for pending background work; bounds total deferral. */
@@ -753,6 +745,7 @@ export const layerWithOptions = (
                     releasedProviderThreadOwner: {
                       providerSessionId: input.runtime.providerSessionId,
                       cutoff: input.release.occurredAt,
+                      threadIds: [...input.release.threadIds],
                     },
                   }),
             });
@@ -1191,17 +1184,11 @@ export const layerWithOptions = (
           // Capture runtime identity before yielding: a replacement session
           // can reuse the same providerSessionId while this fiber is parked.
           const probedRuntime = entry.runtime;
-          const hasPendingWork =
-            probedRuntime.hasPendingBackgroundWork === undefined
-              ? false
-              : yield* probedRuntime.hasPendingBackgroundWork.pipe(
-                  Effect.catchCause(() => Effect.succeed(false)),
-                );
-          const hasRetainedServices =
-            probedRuntime.hasRetainedBackgroundServices === undefined
-              ? false
-              : yield* probedRuntime.hasRetainedBackgroundServices.pipe(
-                  Effect.catchCause(() => Effect.succeed(false)),
+          const { pending: hasPendingWork, retained: hasRetainedServices } =
+            probedRuntime.getBackgroundWork === undefined
+              ? { pending: false, retained: false }
+              : yield* probedRuntime.getBackgroundWork.pipe(
+                  Effect.catchCause(() => Effect.succeed({ pending: false, retained: false })),
                 );
           if (hasPendingWork || hasRetainedServices) {
             const now = yield* Clock.currentTimeMillis;
@@ -1244,7 +1231,7 @@ export const layerWithOptions = (
               pinnedForMs: now - pinnedSinceMs,
             });
           }
-          // hasPendingBackgroundWork yields to the adapter, so the idle
+          // getBackgroundWork yields to the adapter, so the idle
           // decision above can go stale; the generation guard revalidates
           // busyTurns and idleGeneration inside releaseEntry's atomic
           // entry removal.
@@ -1581,7 +1568,7 @@ export const layerWithOptions = (
         providerSessionId: ProviderSessionId,
         providerThreadId: ProviderThreadId,
         runOrdinal: number,
-        attemptId: RunAttemptId | undefined,
+        attemptId: RunAttemptId,
       ) =>
         withActivityError(
           providerSessionId,
@@ -1595,7 +1582,7 @@ export const layerWithOptions = (
               }
               const busyTurns = new Map(entry.busyTurns);
               const turnKey = busyTurnKey(providerThreadId, runOrdinal);
-              if (attemptId !== undefined && busyTurns.get(turnKey) === attemptId) {
+              if (busyTurns.get(turnKey) === attemptId) {
                 busyTurns.delete(turnKey);
               }
               const updated = new Map(current);
@@ -1838,7 +1825,7 @@ export const layerWithOptions = (
         eventSubscribers: Ref.Ref<
           ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
         >,
-      ): ManagedProviderSessionRuntime => {
+      ): ProviderAdapterV2SessionRuntime => {
         const providerSessionId = runtime.providerSessionId;
         const subscribeEvents = makeEventSubscription(eventSubscribers);
         // Every provider's turn operations pass through here, so this is where they are
@@ -1872,7 +1859,6 @@ export const layerWithOptions = (
         const compactThread = runtime.compactThread;
         return {
           ...runtime,
-          persistsProviderThreadEvents: true,
           subscribeEvents,
           events: Stream.unwrap(
             subscribeEvents.pipe(Effect.map((subscription) => subscription.events)),
@@ -2155,12 +2141,10 @@ export const layerWithOptions = (
           if (current?.runtime !== entry.runtime || terminal.driver !== entry.runtime.driver)
             return;
           for (const threadId of current.attachedThreadIds) {
-            const { providerThreads, providerTurns, runs } =
-              yield* projectionStore.getThreadRecords(threadId, [
-                "providerThreads",
-                "providerTurns",
-                "runs",
-              ]);
+            const { providerThreads, runs } = yield* projectionStore.getThreadRecords(threadId, [
+              "providerThreads",
+              "runs",
+            ]);
             const providerThread = providerThreads.find(
               (thread) =>
                 thread.id === terminal.providerThreadId &&
@@ -2172,14 +2156,8 @@ export const layerWithOptions = (
                 run.ordinal === terminal.runOrdinal &&
                 run.providerThreadId === terminal.providerThreadId,
             );
-            const attemptId =
-              entry.attemptIdByProviderTurn.get(terminal.providerTurnId) ??
-              providerTurns.find(
-                (turn) =>
-                  turn.id === terminal.providerTurnId &&
-                  turn.providerThreadId === terminal.providerThreadId,
-              )?.runAttemptId;
-            if (providerThread === undefined || owner === undefined || attemptId == null) continue;
+            const attemptId = terminal.runAttemptId;
+            if (providerThread === undefined || owner === undefined) continue;
             const status = terminal.threadDisposition === "broken" ? "error" : "idle";
             if (providerThread.status === status) return;
             const event = {
@@ -2227,16 +2205,6 @@ export const layerWithOptions = (
             ) {
               stoppedByProvider = true;
             }
-            if (
-              event.type === "provider_turn.updated" &&
-              event.driver === entry.runtime.driver &&
-              event.providerTurn.runAttemptId !== null
-            ) {
-              entry.attemptIdByProviderTurn.set(
-                event.providerTurn.id,
-                event.providerTurn.runAttemptId,
-              );
-            }
             return observeActivity(
               entry.runtime.providerSessionId,
               event.type === "turn.terminal"
@@ -2244,7 +2212,7 @@ export const layerWithOptions = (
                     entry.runtime.providerSessionId,
                     event.providerThreadId,
                     event.runOrdinal,
-                    entry.attemptIdByProviderTurn.get(event.providerTurnId),
+                    event.runAttemptId,
                   )
                 : touchActivity(entry.runtime.providerSessionId),
             ).pipe(
@@ -2574,7 +2542,6 @@ export const layerWithOptions = (
                 scope: sessionScope,
                 idleGeneration: 0,
                 busyTurns: new Map(),
-                attemptIdByProviderTurn: new Map(),
                 lastActivityAtMs: now,
                 idleFiber: null,
                 pinnedSinceMs: null,

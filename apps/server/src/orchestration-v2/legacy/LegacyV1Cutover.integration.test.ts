@@ -543,6 +543,7 @@ const makeCodexAdapter = (capturedTurns: Ref.Ref<ReadonlyArray<CapturedTurn>>) =
                 },
                 {
                   type: "turn.terminal",
+                  runAttemptId: turnInput.attemptId,
                   driver,
                   providerThreadId: turnInput.providerThread.id,
                   providerTurnId,

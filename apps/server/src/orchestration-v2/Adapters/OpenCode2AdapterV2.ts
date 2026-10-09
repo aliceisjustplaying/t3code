@@ -1788,6 +1788,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       yield* setSessionStatus(pending.size > 0 ? "waiting" : anyActive ? "running" : "ready", null);
       const base = {
         type: "turn.terminal" as const,
+        runAttemptId: turn.providerTurn.runAttemptId!,
         driver,
         // The provider thread the turn started on. After a native fork the
         // session's own thread has a fresh id, and the terminal must name the
@@ -3572,7 +3573,10 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       events: Stream.fromQueue(events),
       // A background subagent keeps its session busy after its parent's turn,
       // and a held wake still needs its turn: idle release must wait for both.
-      hasPendingBackgroundWork: Effect.sync(() => [...threads.values()].some(owesWork)),
+      getBackgroundWork: Effect.sync(() => ({
+        pending: [...threads.values()].some(owesWork),
+        retained: false,
+      })),
       hasPendingBackgroundWorkForThread: (providerThread) =>
         Effect.sync(() => {
           const nativeId = providerThread.nativeThreadRef?.nativeId;

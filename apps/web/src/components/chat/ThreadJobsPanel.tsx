@@ -5,9 +5,15 @@ import {
   type ThreadJob,
 } from "@t3tools/client-runtime/jobs";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
-import type { EnvironmentId, ThreadId, TurnItemId } from "@t3tools/contracts";
+import {
+  AuthOrchestrationOperateScope,
+  type EnvironmentId,
+  type ThreadId,
+  type TurnItemId,
+} from "@t3tools/contracts";
 import { useState } from "react";
 import { useThreadProjection } from "../../state/entities";
+import { readEnvironmentScope, useEnvironmentScope } from "../../state/session";
 import { threadEnvironment } from "../../state/threads";
 import { useThreadJobs } from "../../state/use-thread-jobs";
 import { useTurnItemDetail } from "../../state/queries";
@@ -130,6 +136,7 @@ export function ThreadJobDetails(props: Target & { itemId: TurnItemId; onClose: 
   const job =
     liveJob && (!fetchedJob || liveJob.revision >= fetchedJob.revision) ? liveJob : fetchedJob;
   const stop = useAtomCommand(threadEnvironment.stopJob);
+  const canStop = useEnvironmentScope(props.environmentId, AuthOrchestrationOperateScope);
   const [confirm, setConfirm] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -151,7 +158,11 @@ export function ThreadJobDetails(props: Target & { itemId: TurnItemId; onClose: 
               <div className="mt-2 flex items-center justify-between gap-3">
                 <h2 className="text-xl font-semibold">{job.name}</h2>
                 {job.state === "running" && (
-                  <Button variant="outline" disabled={pending} onClick={() => setConfirm(true)}>
+                  <Button
+                    variant="outline"
+                    disabled={pending || !canStop}
+                    onClick={() => setConfirm(true)}
+                  >
                     Stop job
                   </Button>
                 )}
@@ -213,8 +224,12 @@ export function ThreadJobDetails(props: Target & { itemId: TurnItemId; onClose: 
                       Keep running
                     </AlertDialogClose>
                     <Button
-                      disabled={pending || !jobIsActive(job)}
+                      disabled={pending || !canStop || !jobIsActive(job)}
                       onClick={() => {
+                        if (
+                          !readEnvironmentScope(props.environmentId, AuthOrchestrationOperateScope)
+                        )
+                          return;
                         setPending(true);
                         setError(null);
                         void stop({

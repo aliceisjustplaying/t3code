@@ -36,8 +36,12 @@ export function assertPiCompactionOutput(
   assert.deepEqual(
     outbound.filter((frame) => field(frame, "type") === "compact"),
     [
-      { type: "compact", customInstructions: `keep the opaque marker ${PI_COMPACTION_MARKER}` },
-      { type: "compact" },
+      {
+        type: "compact",
+        id: "t3-11",
+        customInstructions: `keep the opaque marker ${PI_COMPACTION_MARKER}`,
+      },
+      { type: "compact", id: "t3-28" },
     ],
   );
   const compactionEnds = transcript.entries

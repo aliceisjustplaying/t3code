@@ -77,6 +77,7 @@ export interface EventSinkV2Shape {
     readonly releasedProviderThreadOwner?: {
       readonly providerSessionId: ProviderSessionId;
       readonly cutoff: DateTime.Utc;
+      readonly threadIds: ReadonlyArray<ThreadId>;
     };
     readonly guardPendingUserInputCancellations?: boolean;
     readonly commandId?: CommandId;
@@ -86,6 +87,7 @@ export interface EventSinkV2Shape {
     readonly releasedProviderThreadOwner?: {
       readonly providerSessionId: ProviderSessionId;
       readonly cutoff: DateTime.Utc;
+      readonly threadIds: ReadonlyArray<ThreadId>;
     };
     readonly guardPendingUserInputCancellations?: boolean;
     readonly commandId?: CommandId;
@@ -382,6 +384,43 @@ const layerBase: Layer.Layer<
       Effect.gen(function* () {
         const guarded: Array<OrchestrationV2DomainEvent> = [];
         for (const event of events) {
+          if (
+            event.type === "turn-item.updated" &&
+            event.payload.type === "system_notice" &&
+            event.payload.job
+          ) {
+            const current = yield* projectionStore.getTurnItem({
+              threadId: event.threadId,
+              itemId: event.payload.id,
+            });
+            if (
+              current?.type !== "system_notice" ||
+              current.job === undefined ||
+              current.job.providerSessionId !== owner.providerSessionId ||
+              !owner.threadIds.includes(current.job.sourceThreadId ?? current.threadId) ||
+              current.job.scope !== event.payload.job.scope ||
+              current.job.id !== event.payload.job.id ||
+              DateTime.isGreaterThan(current.updatedAt, owner.cutoff) ||
+              current.status !== "running" ||
+              (current.job.state !== "running" && current.job.state !== "stopping")
+            )
+              continue;
+            guarded.push({
+              ...event,
+              payload: {
+                ...current,
+                status: "cancelled",
+                completedAt: event.occurredAt,
+                updatedAt: event.occurredAt,
+                job: {
+                  ...current.job,
+                  state: "lost",
+                  endedAt: DateTime.toEpochMillis(event.occurredAt),
+                },
+              },
+            });
+            continue;
+          }
           if (event.type !== "provider-thread.updated") {
             guarded.push(event);
             continue;

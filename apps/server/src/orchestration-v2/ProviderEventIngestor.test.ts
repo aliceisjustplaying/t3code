@@ -460,6 +460,7 @@ layer("ProviderEventIngestorV2", (it) => {
           threadId,
           event: {
             type: "turn.terminal",
+            runAttemptId: RunAttemptId.make("terminal-origin-attempt"),
             driver: CODEX_DRIVER,
             providerThreadId: idAllocator.derive.providerThread({
               driver: CODEX_DRIVER,
@@ -857,6 +858,7 @@ layer("ProviderEventIngestorV2", (it) => {
             terminal === "control"
               ? {
                   type: "turn.terminal" as const,
+                  runAttemptId: RunAttemptId.make("terminal-origin-attempt"),
                   driver: CODEX_DRIVER,
                   providerThreadId,
                   providerTurnId,
@@ -1126,6 +1128,7 @@ layer("ProviderEventIngestorV2", (it) => {
         threadId: threadEvent.threadId,
         event: {
           type: "turn.terminal",
+          runAttemptId: RunAttemptId.make("terminal-origin-attempt"),
           driver: CODEX_DRIVER,
           providerThreadId,
           providerTurnId,

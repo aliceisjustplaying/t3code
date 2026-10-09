@@ -5087,6 +5087,7 @@ export function makeClaudeAdapterV2(
             input.status === "failed"
               ? {
                   type: "turn.terminal",
+                  runAttemptId: input.context.input.attemptId,
                   driver: CLAUDE_PROVIDER,
                   providerThreadId: input.context.input.providerThread.id,
                   providerTurnId: input.context.providerTurnId,
@@ -5107,6 +5108,7 @@ export function makeClaudeAdapterV2(
                 }
               : {
                   type: "turn.terminal",
+                  runAttemptId: input.context.input.attemptId,
                   driver: CLAUDE_PROVIDER,
                   providerThreadId: input.context.input.providerThread.id,
                   providerTurnId: input.context.providerTurnId,
@@ -7846,16 +7848,16 @@ export function makeClaudeAdapterV2(
           getModelContextWindow: (selection) =>
             resolveClaudeCatalogContextWindowTokens(BUNDLED_CLAUDE_MODEL_CATALOG, selection),
           events: Stream.fromEffectRepeat(Queue.take(events)),
-          hasPendingBackgroundWork: Effect.gen(function* () {
+          getBackgroundWork: Effect.gen(function* () {
             // Session capability: any native thread with pending work pins idle.
             for (const roster of (yield* Ref.get(pendingBackgroundTasksByNativeThread)).values()) {
               if (roster.size > 0) {
-                return true;
+                return { pending: true, retained: false };
               }
             }
             for (const subagent of (yield* Ref.get(sessionSubagentsByTaskId)).values()) {
               if (subagent.task.status === "running") {
-                return true;
+                return { pending: true, retained: false };
               }
             }
             const buffers = yield* Ref.get(wakeBuffers);
@@ -7868,10 +7870,10 @@ export function makeClaudeAdapterV2(
                     message.type === "result",
                 )
               ) {
-                return true;
+                return { pending: true, retained: false };
               }
             }
-            return false;
+            return { pending: false, retained: false };
           }),
           hasPendingBackgroundWorkForThread: (providerThread) =>
             Effect.gen(function* () {

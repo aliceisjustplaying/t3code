@@ -741,9 +741,11 @@ describe("OpenCodeAdapterV2", () => {
           children: async () => ({ data: [] }),
         },
       });
-      const hasPendingBackgroundWork = harness.runtime.hasPendingBackgroundWork;
+      const hasPendingBackgroundWork = harness.runtime.getBackgroundWork?.pipe(
+        Effect.map((work) => work.pending),
+      );
       if (hasPendingBackgroundWork === undefined) {
-        return yield* Effect.die("OpenCode runtime must expose hasPendingBackgroundWork.");
+        return yield* Effect.die("OpenCode runtime must expose getBackgroundWork.");
       }
       yield* harness.startTurn();
       const terminal = yield* harness.runtime.events.pipe(

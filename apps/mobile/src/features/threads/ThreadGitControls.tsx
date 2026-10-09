@@ -400,6 +400,7 @@ function useThreadGitHeaderActionItems(props: ThreadGitControlsProps): ThreadGit
                                       type: "action" as const,
                                       label: child.title,
                                       description: child.subtitle,
+                                      disabled: child.disabled,
                                       onPress: child.onPress,
                                     },
                                   ]
@@ -410,6 +411,7 @@ function useThreadGitHeaderActionItems(props: ThreadGitControlsProps): ThreadGit
                             type: "action" as const,
                             label: item.title,
                             description: item.subtitle,
+                            disabled: item.disabled,
                             onPress: item.onPress,
                           },
                     ),

@@ -2219,10 +2219,12 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         ),
         Effect.forkScoped,
       );
-      if (runtime.hasPendingBackgroundWork === undefined) {
-        throw new Error("Claude adapter runtime must expose hasPendingBackgroundWork.");
+      if (runtime.getBackgroundWork === undefined) {
+        throw new Error("Claude adapter runtime must expose getBackgroundWork.");
       }
-      const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+      const hasPendingBackgroundWork = runtime.getBackgroundWork.pipe(
+        Effect.map((work) => work.pending),
+      );
       const terminalEvents = () =>
         events.filter(
           (event): event is Extract<ProviderAdapterV2Event, { type: "turn.terminal" }> =>
@@ -3999,10 +4001,12 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           ),
           Effect.forkScoped,
         );
-        if (runtime.hasPendingBackgroundWork === undefined) {
-          return yield* Effect.die("Claude adapter runtime must expose hasPendingBackgroundWork.");
+        if (runtime.getBackgroundWork === undefined) {
+          return yield* Effect.die("Claude adapter runtime must expose getBackgroundWork.");
         }
-        const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+        const hasPendingBackgroundWork = runtime.getBackgroundWork.pipe(
+          Effect.map((work) => work.pending),
+        );
         const terminals = () => events.filter((event) => event.type === "turn.terminal");
         const now = yield* DateTime.now;
 
@@ -4256,17 +4260,17 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             ),
             Effect.forkScoped,
           );
-          if (runtime.hasPendingBackgroundWork === undefined) {
-            return yield* Effect.die(
-              "Claude adapter runtime must expose hasPendingBackgroundWork.",
-            );
+          if (runtime.getBackgroundWork === undefined) {
+            return yield* Effect.die("Claude adapter runtime must expose getBackgroundWork.");
           }
           if (runtime.hasPendingBackgroundWorkForThread === undefined) {
             return yield* Effect.die(
               "Claude adapter runtime must expose hasPendingBackgroundWorkForThread.",
             );
           }
-          const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+          const hasPendingBackgroundWork = runtime.getBackgroundWork.pipe(
+            Effect.map((work) => work.pending),
+          );
           const hasPendingBackgroundWorkForThread = runtime.hasPendingBackgroundWorkForThread;
           const now = yield* DateTime.now;
           const taskA = "task-roster-a";
@@ -8351,10 +8355,12 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           ),
           Effect.forkScoped,
         );
-        if (runtime.hasPendingBackgroundWork === undefined) {
-          return yield* Effect.die("Claude adapter runtime must expose hasPendingBackgroundWork.");
+        if (runtime.getBackgroundWork === undefined) {
+          return yield* Effect.die("Claude adapter runtime must expose getBackgroundWork.");
         }
-        const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+        const hasPendingBackgroundWork = runtime.getBackgroundWork.pipe(
+          Effect.map((work) => work.pending),
+        );
         const now = yield* DateTime.now;
 
         yield* runtime.startTurn(
@@ -8534,12 +8540,12 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             ),
             Effect.forkScoped,
           );
-          if (runtime.hasPendingBackgroundWork === undefined) {
-            return yield* Effect.die(
-              "Claude adapter runtime must expose hasPendingBackgroundWork.",
-            );
+          if (runtime.getBackgroundWork === undefined) {
+            return yield* Effect.die("Claude adapter runtime must expose getBackgroundWork.");
           }
-          const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+          const hasPendingBackgroundWork = runtime.getBackgroundWork.pipe(
+            Effect.map((work) => work.pending),
+          );
           const now = yield* DateTime.now;
 
           yield* runtime.startTurn(
@@ -8772,12 +8778,12 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             ),
             Effect.forkScoped,
           );
-          if (runtime.hasPendingBackgroundWork === undefined) {
-            return yield* Effect.die(
-              "Claude adapter runtime must expose hasPendingBackgroundWork.",
-            );
+          if (runtime.getBackgroundWork === undefined) {
+            return yield* Effect.die("Claude adapter runtime must expose getBackgroundWork.");
           }
-          const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+          const hasPendingBackgroundWork = runtime.getBackgroundWork.pipe(
+            Effect.map((work) => work.pending),
+          );
           const subagentEvents = () =>
             events.filter(
               (event): event is Extract<ProviderAdapterV2Event, { type: "subagent.updated" }> =>
@@ -9137,12 +9143,12 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             ),
             Effect.forkScoped,
           );
-          if (runtime.hasPendingBackgroundWork === undefined) {
-            return yield* Effect.die(
-              "Claude adapter runtime must expose hasPendingBackgroundWork.",
-            );
+          if (runtime.getBackgroundWork === undefined) {
+            return yield* Effect.die("Claude adapter runtime must expose getBackgroundWork.");
           }
-          const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+          const hasPendingBackgroundWork = runtime.getBackgroundWork.pipe(
+            Effect.map((work) => work.pending),
+          );
           const now = yield* DateTime.now;
 
           yield* runtime.startTurn(
@@ -9272,12 +9278,12 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             ),
             Effect.forkScoped,
           );
-          if (runtime.hasPendingBackgroundWork === undefined) {
-            return yield* Effect.die(
-              "Claude adapter runtime must expose hasPendingBackgroundWork.",
-            );
+          if (runtime.getBackgroundWork === undefined) {
+            return yield* Effect.die("Claude adapter runtime must expose getBackgroundWork.");
           }
-          const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+          const hasPendingBackgroundWork = runtime.getBackgroundWork.pipe(
+            Effect.map((work) => work.pending),
+          );
           const now = yield* DateTime.now;
 
           yield* runtime.startTurn(

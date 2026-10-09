@@ -2121,10 +2121,12 @@ export function makeOpenCodeAdapterV2(
             anotherTurnIsActive ? "running" : status === "failed" ? "error" : "ready",
             status === "failed" ? sessionEntity.lastError : null,
           );
+          // Native child turns return above; root turns retain their originating attempt.
           yield* emitProviderEvent(
             status === "failed"
               ? {
                   type: "turn.terminal",
+                  runAttemptId: turn.runAttemptId!,
                   driver: OPENCODE_PROVIDER,
                   providerThreadId: turn.providerThreadId,
                   providerTurnId: turn.providerTurnId,
@@ -2141,6 +2143,7 @@ export function makeOpenCodeAdapterV2(
                 }
               : {
                   type: "turn.terminal",
+                  runAttemptId: turn.runAttemptId!,
                   driver: OPENCODE_PROVIDER,
                   providerThreadId: turn.providerThreadId,
                   providerTurnId: turn.providerTurnId,
@@ -3042,7 +3045,10 @@ export function makeOpenCodeAdapterV2(
           providerSessionId: input.providerSessionId,
           providerSession: sessionEntity,
           events: Stream.fromEffectRepeat(Queue.take(events)),
-          hasPendingBackgroundWork: Effect.sync(() => busySessionIds.size > 0),
+          getBackgroundWork: Effect.sync(() => ({
+            pending: busySessionIds.size > 0,
+            retained: false,
+          })),
           ensureThread: (threadInput) =>
             Effect.gen(function* () {
               // Only a row that already carries a native session can be

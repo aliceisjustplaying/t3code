@@ -20,11 +20,14 @@ const ui = vi.hoisted(() => ({
   ask: null as null | (() => void),
   askDisabled: false,
   visible: false,
+  unread: false,
+  read: vi.fn(async (_input: unknown) => ({ _tag: "Success" })),
   errors: [] as ReactNode[],
   navigate: vi.fn(),
   draftReady: vi.fn(),
   threadId: "current",
   environmentId: "environment",
+  deniedEnvironment: null as string | null,
   command: vi.fn(async (_input: unknown) => ({ _tag: "Success" })),
 }));
 const storage = vi.hoisted(() => ({
@@ -59,7 +62,11 @@ vi.mock("expo-file-system", () => ({
 vi.mock("../../lib/uuid", () => ({ uuidv4: () => "uuid", randomHex: () => "0000" }));
 vi.mock("../../state/assets", () => ({ assetEnvironment: {} }));
 vi.mock("../../state/attachments", () => ({ attachmentEnvironment: {} }));
-vi.mock("../../state/session", () => ({ environmentSession: {} }));
+vi.mock("../../state/session", () => ({
+  environmentSession: {},
+  useEnvironmentScope: (environment: EnvironmentId) => environment !== ui.deniedEnvironment,
+  readEnvironmentScope: (environment: EnvironmentId) => environment !== ui.deniedEnvironment,
+}));
 vi.mock("../../features/sharing/incoming-share-storage", () => ({
   loadIncomingShareDrafts: async () => [],
 }));
@@ -82,7 +89,9 @@ vi.mock("../../state/headsUpInbox", () => ({
     resolve: "resolve",
   },
 }));
-vi.mock("../../state/use-atom-command", () => ({ useAtomCommand: () => ui.command }));
+vi.mock("../../state/use-atom-command", () => ({
+  useAtomCommand: (command: string) => (command === "read" ? ui.read : ui.command),
+}));
 vi.mock("../../state/query", () => ({
   useEnvironmentQuery: (query: string) => ({
     data:
@@ -91,6 +100,7 @@ vi.mock("../../state/query", () => ({
             items: [
               {
                 ...entry,
+                readAt: ui.unread ? null : entry.readAt,
                 note: {
                   ...entry.note,
                   ...(ui.view === "reviewed" ? { resolution: "dismiss" } : {}),
@@ -253,10 +263,13 @@ beforeEach(() => {
   ui.actions.clear();
   ui.ask = null;
   ui.errors = [];
+  ui.unread = false;
+  ui.read.mockClear();
   ui.navigate.mockClear();
   ui.draftReady.mockReset();
   ui.threadId = "current";
   ui.environmentId = environmentId;
+  ui.deniedEnvironment = null;
   ui.command.mockReset().mockResolvedValue({ _tag: "Success" });
   const document = { nodeType: 9, addEventListener() {}, removeEventListener() {} };
   const container = {
@@ -493,4 +506,42 @@ it("same-thread Ask reveals the prepared draft only after dismissal succeeds, pr
   expect(ui.draftReady).toHaveBeenCalledTimes(1);
   expect(ui.visible).toBe(false);
   expect(ui.navigate).not.toHaveBeenCalled();
+});
+
+it("Ask rechecks the destination grant after disk hydration before dismissing or changing a draft", async () => {
+  const hydration = Promise.withResolvers<void>();
+  storage.barrier = hydration.promise;
+  await openNotice();
+  await act(async () => ui.ask!());
+  ui.deniedEnvironment = environmentId;
+  await act(async () => {
+    hydration.resolve();
+    await waitForComposerDraftsLoaded();
+  });
+  expect(ui.command).not.toHaveBeenCalled();
+  expect(getComposerDraftSnapshot(key)).toMatchObject(draft);
+  expect(ui.visible).toBe(true);
+  expect(ui.navigate).not.toHaveBeenCalled();
+  expect(ui.draftReady).not.toHaveBeenCalled();
+});
+
+it("read-only native destination can browse both views without acknowledging or resolving notices", async () => {
+  ui.environmentId = "other-environment";
+  ui.deniedEnvironment = ui.environmentId;
+  ui.unread = true;
+  await openNotice();
+  expect(ui.read).not.toHaveBeenCalled();
+  for (const label of ["Dismiss", "Knew", "Ask agent · Draft"]) {
+    expect(ui.actions.get(label)!.disabled).toBe(true);
+  }
+  await act(async () => ui.presses.get("tab")!());
+  expect(ui.actions.get("Undo")!.disabled).toBe(true);
+  expect(ui.command).not.toHaveBeenCalled();
+  ui.deniedEnvironment = null;
+  await act(async () => root.render(createElement(Probe)));
+  expect(ui.read).toHaveBeenCalledWith({
+    environmentId: "other-environment",
+    input: { threadId: entry.threadId, turnItemId: entry.turnItemId },
+  });
+  expect(ui.actions.get("Undo")!.disabled).toBe(false);
 });
